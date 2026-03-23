@@ -11,16 +11,26 @@
     "cdk": "cdk"
   },
   "devDependencies": {
+    "@types/aws-lambda": "^8.10.161",
     "@types/jest": "^30",
     "@types/node": "^24.10.1",
+    "@types/pg": "^8.20.0",
+    "aws-cdk": "2.1112.0",
+    "esbuild": "^0.25.3",
     "jest": "^30",
     "ts-jest": "^29",
-    "aws-cdk": "2.1112.0",
     "ts-node": "^10.9.2",
     "typescript": "~5.9.3"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.243.0",
-    "constructs": "^10.5.0"
+    "@asteasolutions/zod-to-openapi": "^8.5.0",
+    "@aws-sdk/client-lambda": "^3.1014.0",
+    "@aws-sdk/client-rds-data": "^3.1014.0",
+    "@aws-sdk/client-secrets-manager": "^3.1014.0",
+    "aws-cdk-lib": "^2.244.0",
+    "constructs": "^10.5.1",
+    "pg": "^8.20.0",
+    "swagger-ui-dist": "^5.32.1",
+    "zod": "^4.3.6"
   }
 }

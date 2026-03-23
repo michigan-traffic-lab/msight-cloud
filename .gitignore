@@ -1,5 +1,7 @@
 *.js
 !jest.config.js
+!init-db.js
+!test-client.js
 *.d.ts
 node_modules
 

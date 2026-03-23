@@ -12,3 +12,58 @@ The `cdk.json` file tells the CDK Toolkit how to execute your app.
 * `npx cdk deploy`  deploy this stack to your default AWS account/region
 * `npx cdk diff`    compare deployed stack with current state
 * `npx cdk synth`   emits the synthesized CloudFormation template
+
+Windows PowerShell note: if script execution is restricted, run CDK commands with `npx.cmd` (for example, `npx.cmd cdk synth`).
+
+## Deployment instructions
+
+### 1. Install dependencies
+
+```bash
+npm install
+```
+
+### 2. Build locally
+
+```bash
+npm run build
+```
+
+### 3. Review infrastructure/code changes
+
+```bash
+npx cdk diff MsightCloudStack --no-change-set
+```
+
+### 4. Deploy
+
+```bash
+npx cdk deploy MsightCloudStack --require-approval never
+```
+
+### 5. Verify the deployed version
+
+Use the `HttpApiUrl` from deploy output and call:
+
+```text
+GET <HttpApiUrl>/system/version
+```
+
+Example:
+
+```text
+https://6ngwyshn4e.execute-api.us-east-1.amazonaws.com/system/version
+```
+
+Expected shape:
+
+```json
+{
+	"service": "system-api",
+	"api_version": "v1",
+	"build_id": "<hash>",
+	"server_timestamp": "<iso timestamp>"
+}
+```
+
+If `build_id` changes after code edits and deploy, you are hitting the newest deployed Lambda.

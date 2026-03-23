@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MSight Location Test</title>
+    <style>
+      :root {
+        --bg: #f6f8fb;
+        --card: #ffffff;
+        --text: #152033;
+        --muted: #5f6b7a;
+        --border: #d9e1ea;
+        --accent: #0b57d0;
+        --accent-hover: #0847ab;
+        --success: #0f9d58;
+        --error: #d93025;
+        --shadow: 0 10px 30px rgba(16, 24, 40, 0.08);
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .page {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        box-shadow: var(--shadow);
+        padding: 16px;
+      }
+
+      h1 {
+        font-size: 1.35rem;
+        margin: 0 0 6px;
+      }
+
+      .subtitle {
+        margin: 0 0 16px;
+        color: var(--muted);
+        font-size: 0.95rem;
+        line-height: 1.4;
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      label {
+        font-size: 0.92rem;
+        font-weight: 600;
+      }
+
+      input {
+        width: 100%;
+        min-height: 46px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 12px;
+        font-size: 1rem;
+        outline: none;
+        background: #fff;
+      }
+
+      input:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(11, 87, 208, 0.12);
+      }
+
+      input[readonly] {
+        background: #f2f5f9;
+        color: #495465;
+      }
+
+      .button-row {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+        margin-top: 8px;
+      }
+
+      button {
+        border: none;
+        border-radius: 12px;
+        min-height: 46px;
+        padding: 10px 14px;
+        font-size: 1rem;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .btn-primary {
+        background: var(--accent);
+        color: white;
+      }
+
+      .btn-primary:hover { background: var(--accent-hover); }
+
+      .btn-secondary {
+        background: #eef3fb;
+        color: var(--accent);
+        border: 1px solid #d4e3fb;
+      }
+
+      .status {
+        margin-top: 12px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        font-size: 0.94rem;
+        display: none;
+      }
+
+      .status.show { display: block; }
+      .status.info { background: #eef3fb; color: #214b8f; }
+      .status.success { background: #e9f7ef; color: var(--success); }
+      .status.error { background: #fdecea; color: var(--error); }
+
+      .table-card {
+        margin-top: 16px;
+      }
+
+      .table-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      .table-header h2 {
+        margin: 0;
+        font-size: 1.05rem;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 620px;
+      }
+
+      th, td {
+        text-align: left;
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.93rem;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .small {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .pill {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 700;
+      }
+
+      .pill.success { background: #e9f7ef; color: var(--success); }
+      .pill.error { background: #fdecea; color: var(--error); }
+
+      @media (min-width: 640px) {
+        .form-grid {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .field.full {
+          grid-column: 1 / -1;
+        }
+
+        .button-row {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="card">
+        <h1>MSight Location Test</h1>
+        <p class="subtitle">
+          Submit location updates to the MSight cloud endpoint. Designed for mobile browser field testing.
+        </p>
+
+        <form id="locationForm">
+          <div class="form-grid">
+            <div class="field full">
+              <label for="appId">App ID</label>
+              <input id="appId" name="appId" type="text" value="msight-internal-testing-app" readonly />
+            </div>
+
+            <div class="field">
+              <label for="clientId">Client ID</label>
+              <input id="clientId" name="clientId" type="text" value="client1" maxlength="128" required />
+            </div>
+
+            <div class="field">
+              <label for="endpoint">Endpoint</label>
+              <input id="endpoint" name="endpoint" type="text" value="https://6ngwyshn4e.execute-api.us-east-1.amazonaws.com/v1/clients/location/update" readonly />
+            </div>
+
+            <div class="field">
+              <label for="lat">Latitude</label>
+              <input id="lat" name="lat" type="number" step="any" placeholder="e.g. 42.2808" required />
+            </div>
+
+            <div class="field">
+              <label for="lon">Longitude</label>
+              <input id="lon" name="lon" type="number" step="any" placeholder="e.g. -83.743" required />
+            </div>
+          </div>
+
+          <div class="button-row">
+            <button type="button" class="btn-secondary" id="getLocationBtn">Use Device Location</button>
+            <button type="submit" class="btn-primary" id="submitBtn">Send Update</button>
+          </div>
+        </form>
+
+        <div id="status" class="status info"></div>
+      </div>
+
+      <div class="card table-card">
+        <div class="table-header">
+          <h2>Request Log</h2>
+          <div class="small" id="logCount">0 records</div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Time</th>
+                <th>App ID</th>
+                <th>Client ID</th>
+                <th>Lat</th>
+                <th>Lon</th>
+                <th>RTT (ms)</th>
+              </tr>
+            </thead>
+            <tbody id="logTableBody">
+              <tr>
+                <td colspan="7" class="small">No requests yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const APP_ID = 'msight-internal-testing-app';
+      const ENDPOINT = 'https://6ngwyshn4e.execute-api.us-east-1.amazonaws.com/v1/clients/location/update';
+
+      const form = document.getElementById('locationForm');
+      const clientIdInput = document.getElementById('clientId');
+      const latInput = document.getElementById('lat');
+      const lonInput = document.getElementById('lon');
+      const statusBox = document.getElementById('status');
+      const getLocationBtn = document.getElementById('getLocationBtn');
+      const submitBtn = document.getElementById('submitBtn');
+      const logTableBody = document.getElementById('logTableBody');
+      const logCount = document.getElementById('logCount');
+
+      const requestLog = [];
+
+      function setStatus(message, type = 'info') {
+        statusBox.textContent = message;
+        statusBox.className = `status show ${type}`;
+      }
+
+      function clearStatus() {
+        statusBox.textContent = '';
+        statusBox.className = 'status';
+      }
+
+      function updateLogTable() {
+        logCount.textContent = `${requestLog.length} record${requestLog.length === 1 ? '' : 's'}`;
+
+        if (requestLog.length === 0) {
+          logTableBody.innerHTML = '<tr><td colspan="7" class="small">No requests yet.</td></tr>';
+          return;
+        }
+
+        logTableBody.innerHTML = requestLog
+          .map((row) => {
+            const statusClass = row.ok ? 'success' : 'error';
+            return `
+              <tr>
+                <td><span class="pill ${statusClass}">${row.ok ? 'OK' : 'ERR'}</span></td>
+                <td>${row.time}</td>
+                <td>${escapeHtml(row.appId)}</td>
+                <td>${escapeHtml(row.clientId)}</td>
+                <td>${row.lat}</td>
+                <td>${row.lon}</td>
+                <td>${row.rtt}</td>
+              </tr>
+            `;
+          })
+          .join('');
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#039;');
+      }
+
+      function addLogRow({ ok, appId, clientId, lat, lon, rtt }) {
+        requestLog.unshift({
+          ok,
+          appId,
+          clientId,
+          lat: Number(lat).toFixed(6),
+          lon: Number(lon).toFixed(6),
+          rtt,
+          time: new Date().toLocaleTimeString(),
+        });
+
+        if (requestLog.length > 100) {
+          requestLog.pop();
+        }
+
+        updateLogTable();
+      }
+
+      function validateInputs(clientId, lat, lon) {
+        if (!clientId || !clientId.trim()) {
+          throw new Error('Client ID is required.');
+        }
+
+        const latNum = Number(lat);
+        const lonNum = Number(lon);
+
+        if (!Number.isFinite(latNum) || latNum < -90 || latNum > 90) {
+          throw new Error('Latitude must be a valid number between -90 and 90.');
+        }
+
+        if (!Number.isFinite(lonNum) || lonNum < -180 || lonNum > 180) {
+          throw new Error('Longitude must be a valid number between -180 and 180.');
+        }
+
+        return { latNum, lonNum };
+      }
+
+      getLocationBtn.addEventListener('click', async () => {
+        clearStatus();
+
+        if (!navigator.geolocation) {
+          setStatus('This browser does not support geolocation.', 'error');
+          return;
+        }
+
+        setStatus('Requesting browser location...', 'info');
+
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            latInput.value = String(position.coords.latitude);
+            lonInput.value = String(position.coords.longitude);
+            setStatus('Browser location loaded.', 'success');
+          },
+          (error) => {
+            let message = 'Failed to get browser location.';
+            if (error.code === error.PERMISSION_DENIED) {
+              message = 'Location permission was denied.';
+            } else if (error.code === error.POSITION_UNAVAILABLE) {
+              message = 'Location information is unavailable.';
+            } else if (error.code === error.TIMEOUT) {
+              message = 'Location request timed out.';
+            }
+            setStatus(message, 'error');
+          },
+          {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 5000,
+          }
+        );
+      });
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        clearStatus();
+
+        const clientId = clientIdInput.value.trim();
+        const lat = latInput.value;
+        const lon = lonInput.value;
+
+        let latNum;
+        let lonNum;
+
+        try {
+          ({ latNum, lonNum } = validateInputs(clientId, lat, lon));
+        } catch (error) {
+          setStatus(error.message || 'Invalid input.', 'error');
+          return;
+        }
+
+        const payload = {
+          app_id: APP_ID,
+          client_id: clientId,
+          timestamp: new Date().toISOString(),
+          location: {
+            lat: latNum,
+            lon: lonNum,
+          },
+        };
+
+        submitBtn.disabled = true;
+        getLocationBtn.disabled = true;
+        setStatus('Sending location update...', 'info');
+
+        const start = performance.now();
+        let ok = false;
+
+        try {
+          const response = await fetch(ENDPOINT, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+          });
+
+          const rtt = Math.round(performance.now() - start);
+
+          let responseBody = null;
+          try {
+            responseBody = await response.json();
+          } catch {
+            responseBody = null;
+          }
+
+          ok = response.ok;
+
+          addLogRow({
+            ok,
+            appId: APP_ID,
+            clientId,
+            lat: latNum,
+            lon: lonNum,
+            rtt,
+          });
+
+          if (response.ok) {
+            setStatus(`Update sent successfully. RTT: ${rtt} ms.`, 'success');
+          } else {
+            const message = responseBody?.message || `Request failed with status ${response.status}.`;
+            setStatus(`${message} RTT: ${rtt} ms.`, 'error');
+          }
+        } catch (error) {
+          const rtt = Math.round(performance.now() - start);
+          addLogRow({
+            ok: false,
+            appId: APP_ID,
+            clientId,
+            lat: latNum,
+            lon: lonNum,
+            rtt,
+          });
+          setStatus(`Network error: ${error.message || 'Request failed'}. RTT: ${rtt} ms.`, 'error');
+        } finally {
+          submitBtn.disabled = false;
+          getLocationBtn.disabled = false;
+        }
+      });
+
+      updateLogTable();
+    </script>
+  </body>
+</html>
