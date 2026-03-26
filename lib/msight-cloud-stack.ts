@@ -71,6 +71,7 @@ export class MsightCloudStack extends cdk.Stack {
     const deploymentMode = this.node.tryGetContext('deploymentMode') ?? 'standard';
     const isExtremeLatencyMode = deploymentMode === 'extreme-latency';
     const preferredAz = this.node.tryGetContext('preferredAz');
+    // TODO: organize this better
     const appSubnetType = isExtremeLatencyMode
       ? ec2.SubnetType.PRIVATE_ISOLATED
       : ec2.SubnetType.PRIVATE_WITH_EGRESS;
