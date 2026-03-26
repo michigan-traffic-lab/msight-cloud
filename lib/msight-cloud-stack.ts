@@ -68,13 +68,27 @@ export class MsightCloudStack extends cdk.Stack {
     super(scope, id, props);
 
     const buildId = computeBuildId();
+    const deploymentMode = this.node.tryGetContext('deploymentMode') ?? 'standard';
+    const isExtremeLatencyMode = deploymentMode === 'extreme-latency';
+    const preferredAz = this.node.tryGetContext('preferredAz');
+    const appSubnetType = isExtremeLatencyMode
+      ? ec2.SubnetType.PRIVATE_ISOLATED
+      : ec2.SubnetType.PRIVATE_WITH_EGRESS;
+    const hasPreferredAz = typeof preferredAz === 'string' && preferredAz.length > 0;
+    const appSubnetSelection: ec2.SubnetSelection =
+      isExtremeLatencyMode && hasPreferredAz
+        ? { subnetType: appSubnetType, availabilityZones: [preferredAz] }
+        : { subnetType: appSubnetType };
+    const multiAzAppSubnetSelection: ec2.SubnetSelection = {
+      subnetType: appSubnetType,
+    };
 
     // -------------------------
     // VPC
     // -------------------------
     const vpc = new ec2.Vpc(this, 'MsightVpc', {
       maxAzs: 2,
-      natGateways: 1,
+      natGateways: isExtremeLatencyMode ? 0 : 1,
       subnetConfiguration: [
         {
           name: 'public',
@@ -82,7 +96,7 @@ export class MsightCloudStack extends cdk.Stack {
         },
         {
           name: 'app',
-          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+          subnetType: appSubnetType,
         },
         {
           name: 'db',
@@ -152,8 +166,18 @@ export class MsightCloudStack extends cdk.Stack {
       securityGroups: [proxySg],
       requireTLS: true,
       dbProxyName: 'msight-proxy',
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      vpcSubnets: multiAzAppSubnetSelection,
     });
+
+    if (isExtremeLatencyMode) {
+      // Keep Secrets Manager calls on private AWS network when NAT is disabled.
+      new ec2.InterfaceVpcEndpoint(this, 'SecretsManagerVpcEndpoint', {
+        vpc,
+        service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+        subnets: appSubnetSelection,
+        securityGroups: [lambdaSg],
+      });
+    }
 
     // -------------------------
     // Lambda Common Config
@@ -163,11 +187,11 @@ export class MsightCloudStack extends cdk.Stack {
       memorySize: 256,
       timeout: cdk.Duration.seconds(10),
       vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      vpcSubnets: appSubnetSelection,
       securityGroups: [lambdaSg],
       bundling: {
         minify: true,
-        sourceMap: true,
+        sourceMap: false,
         target: 'node22',
       },
     };
