@@ -233,6 +233,20 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     // -------------------------
+    // Latency Lambda
+    // -------------------------
+    const latencyLambda = new NodejsFunction(this, 'LatencyLambda', {
+      ...commonLambdaProps,
+      entry: path.join(__dirname, '../src/functions/latency-api/handler.ts'),
+      handler: 'handler',
+      environment: {
+        API_VERSION: 'v1',
+        SERVICE_NAME: 'latency-api',
+        BUILD_ID: buildId,
+      },
+    });
+
+    // -------------------------
     // API Gateway
     // -------------------------
     const locationIntegration = new HttpLambdaIntegration(
@@ -243,6 +257,11 @@ export class MsightCloudStack extends cdk.Stack {
     const systemIntegration = new HttpLambdaIntegration(
       'SystemLambdaIntegration',
       systemLambda
+    );
+
+    const latencyIntegration = new HttpLambdaIntegration(
+      'LatencyLambdaIntegration',
+      latencyLambda
     );
 
     const httpApi = new apigwv2.HttpApi(this, 'MsightHttpApi', {
@@ -287,6 +306,12 @@ export class MsightCloudStack extends cdk.Stack {
       path: '/system/version',
       methods: [apigwv2.HttpMethod.GET],
       integration: systemIntegration,
+    });
+
+    httpApi.addRoutes({
+      path: '/v1/client/latency',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: latencyIntegration,
     });
 
     // -------------------------

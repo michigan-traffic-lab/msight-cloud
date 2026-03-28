@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MSight Location Test</title>
+    <title>MSight Client Test</title>
     <style>
       :root {
         --bg: #f6f8fb;
@@ -98,6 +98,42 @@
         margin-top: 8px;
       }
 
+      .tabs {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+
+      .tab-btn {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        min-height: 42px;
+        padding: 8px 12px;
+        font-size: 0.95rem;
+        font-weight: 700;
+        cursor: pointer;
+        background: #fff;
+        color: var(--text);
+      }
+
+      .tab-btn.active {
+        background: #eaf2ff;
+        color: var(--accent);
+        border-color: #b9cff7;
+      }
+
+      .log-tabs {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .panel.hidden {
+        display: none;
+      }
+
       button {
         border: none;
         border-radius: 12px;
@@ -143,7 +179,7 @@
         justify-content: space-between;
         align-items: center;
         gap: 12px;
-        margin-bottom: 12px;
+        margin-bottom: 10px;
       }
 
       .table-header h2 {
@@ -208,44 +244,85 @@
   <body>
     <div class="page">
       <div class="card">
-        <h1>MSight Location Test</h1>
+        <h1>MSight Client Test</h1>
         <p class="subtitle">
-          Submit location updates to the MSight cloud endpoint. Designed for mobile browser field testing.
+          Use tabs to switch between location update testing and pure latency probing.
         </p>
 
-        <form id="locationForm">
-          <div class="form-grid">
-            <div class="field full">
-              <label for="appId">App ID</label>
-              <input id="appId" name="appId" type="text" value="msight-internal-testing-app" readonly />
+        <div class="tabs" role="tablist" aria-label="Test mode selector">
+          <button id="tabLocation" class="tab-btn active" type="button" role="tab" aria-selected="true">
+            Location Update
+          </button>
+          <button id="tabLatency" class="tab-btn" type="button" role="tab" aria-selected="false">
+            Latency Probe
+          </button>
+        </div>
+
+        <div id="locationPanel" class="panel" role="tabpanel">
+          <form id="locationForm">
+            <div class="form-grid">
+              <div class="field full">
+                <label for="locationAppId">App ID</label>
+                <input id="locationAppId" name="locationAppId" type="text" value="msight-internal-testing-app" readonly />
+              </div>
+
+              <div class="field">
+                <label for="locationClientId">Client ID</label>
+                <input id="locationClientId" name="locationClientId" type="text" value="client1" maxlength="128" required />
+              </div>
+
+              <div class="field">
+                <label for="locationEndpoint">Endpoint</label>
+                <input id="locationEndpoint" name="locationEndpoint" type="text" value="https://7hmptbe8s3.execute-api.us-east-2.amazonaws.com/v1/clients/location/update" readonly />
+              </div>
+
+              <div class="field">
+                <label for="lat">Latitude</label>
+                <input id="lat" name="lat" type="number" step="any" placeholder="e.g. 42.2808" required />
+              </div>
+
+              <div class="field">
+                <label for="lon">Longitude</label>
+                <input id="lon" name="lon" type="number" step="any" placeholder="e.g. -83.743" required />
+              </div>
             </div>
 
-            <div class="field">
-              <label for="clientId">Client ID</label>
-              <input id="clientId" name="clientId" type="text" value="client1" maxlength="128" required />
+            <div class="button-row">
+              <button type="button" class="btn-secondary" id="getLocationBtn">Use Device Location</button>
+              <button type="submit" class="btn-primary" id="locationSubmitBtn">Send Location Update</button>
+            </div>
+          </form>
+        </div>
+
+        <div id="latencyPanel" class="panel hidden" role="tabpanel">
+          <form id="latencyForm">
+            <div class="form-grid">
+              <div class="field full">
+                <label for="latencyAppId">App ID</label>
+                <input id="latencyAppId" name="latencyAppId" type="text" value="msight-internal-testing-app" readonly />
+              </div>
+
+              <div class="field">
+                <label for="latencyClientId">Client ID</label>
+                <input id="latencyClientId" name="latencyClientId" type="text" value="client1" maxlength="128" required />
+              </div>
+
+              <div class="field">
+                <label for="latencyEndpoint">Endpoint</label>
+                <input id="latencyEndpoint" name="latencyEndpoint" type="text" value="https://7hmptbe8s3.execute-api.us-east-2.amazonaws.com/v1/client/latency" readonly />
+              </div>
+
+              <div class="field">
+                <label for="seq">Sequence (optional)</label>
+                <input id="seq" name="seq" type="text" placeholder="e.g. 42" maxlength="64" />
+              </div>
             </div>
 
-            <div class="field">
-              <label for="endpoint">Endpoint</label>
-              <input id="endpoint" name="endpoint" type="text" value="https://7hmptbe8s3.execute-api.us-east-2.amazonaws.com/v1/clients/location/update" readonly />
+            <div class="button-row">
+              <button type="submit" class="btn-primary" id="latencySubmitBtn">Run Latency Probe</button>
             </div>
-
-            <div class="field">
-              <label for="lat">Latitude</label>
-              <input id="lat" name="lat" type="number" step="any" placeholder="e.g. 42.2808" required />
-            </div>
-
-            <div class="field">
-              <label for="lon">Longitude</label>
-              <input id="lon" name="lon" type="number" step="any" placeholder="e.g. -83.743" required />
-            </div>
-          </div>
-
-          <div class="button-row">
-            <button type="button" class="btn-secondary" id="getLocationBtn">Use Device Location</button>
-            <button type="submit" class="btn-primary" id="submitBtn">Send Update</button>
-          </div>
-        </form>
+          </form>
+        </div>
 
         <div id="status" class="status info"></div>
       </div>
@@ -256,22 +333,30 @@
           <div class="small" id="logCount">0 records</div>
         </div>
 
+        <div class="log-tabs" role="tablist" aria-label="Log filter selector">
+          <button id="logTabLocation" class="tab-btn active" type="button" role="tab" aria-selected="true">
+            Location Log
+          </button>
+          <button id="logTabLatency" class="tab-btn" type="button" role="tab" aria-selected="false">
+            Latency Log
+          </button>
+        </div>
+
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>Status</th>
-                <th>Time</th>
-                <th>App ID</th>
                 <th>Client ID</th>
-                <th>Lat</th>
-                <th>Lon</th>
+                <th>Client Sent</th>
+                <th>Client Received</th>
+                <th>Details</th>
                 <th>RTT (ms)</th>
               </tr>
             </thead>
             <tbody id="logTableBody">
               <tr>
-                <td colspan="7" class="small">No requests yet.</td>
+                <td colspan="6" class="small">No requests yet.</td>
               </tr>
             </tbody>
           </table>
@@ -281,19 +366,35 @@
 
     <script>
       const APP_ID = 'msight-internal-testing-app';
-      const ENDPOINT = 'https://7hmptbe8s3.execute-api.us-east-2.amazonaws.com/v1/clients/location/update';
+      const LOCATION_ENDPOINT = 'https://7hmptbe8s3.execute-api.us-east-2.amazonaws.com/v1/clients/location/update';
+      const LATENCY_ENDPOINT = 'https://7hmptbe8s3.execute-api.us-east-2.amazonaws.com/v1/client/latency';
 
-      const form = document.getElementById('locationForm');
-      const clientIdInput = document.getElementById('clientId');
+      const tabLocation = document.getElementById('tabLocation');
+      const tabLatency = document.getElementById('tabLatency');
+      const locationPanel = document.getElementById('locationPanel');
+      const latencyPanel = document.getElementById('latencyPanel');
+
+      const locationForm = document.getElementById('locationForm');
+      const latencyForm = document.getElementById('latencyForm');
+
+      const locationClientIdInput = document.getElementById('locationClientId');
+      const latencyClientIdInput = document.getElementById('latencyClientId');
+      const seqInput = document.getElementById('seq');
       const latInput = document.getElementById('lat');
       const lonInput = document.getElementById('lon');
       const statusBox = document.getElementById('status');
       const getLocationBtn = document.getElementById('getLocationBtn');
-      const submitBtn = document.getElementById('submitBtn');
+      const locationSubmitBtn = document.getElementById('locationSubmitBtn');
+      const latencySubmitBtn = document.getElementById('latencySubmitBtn');
+      const logTabLocation = document.getElementById('logTabLocation');
+      const logTabLatency = document.getElementById('logTabLatency');
       const logTableBody = document.getElementById('logTableBody');
       const logCount = document.getElementById('logCount');
 
-      const requestLog = [];
+      const locationLog = [];
+      const latencyLog = [];
+      let activeMode = 'location';
+      let activeLogTab = 'location';
 
       function setStatus(message, type = 'info') {
         statusBox.textContent = message;
@@ -306,24 +407,24 @@
       }
 
       function updateLogTable() {
-        logCount.textContent = `${requestLog.length} record${requestLog.length === 1 ? '' : 's'}`;
+        const currentLog = activeLogTab === 'location' ? locationLog : latencyLog;
+        logCount.textContent = `${currentLog.length} record${currentLog.length === 1 ? '' : 's'}`;
 
-        if (requestLog.length === 0) {
-          logTableBody.innerHTML = '<tr><td colspan="7" class="small">No requests yet.</td></tr>';
+        if (currentLog.length === 0) {
+          logTableBody.innerHTML = '<tr><td colspan="6" class="small">No requests yet.</td></tr>';
           return;
         }
 
-        logTableBody.innerHTML = requestLog
+        logTableBody.innerHTML = currentLog
           .map((row) => {
             const statusClass = row.ok ? 'success' : 'error';
             return `
               <tr>
                 <td><span class="pill ${statusClass}">${row.ok ? 'OK' : 'ERR'}</span></td>
-                <td>${row.time}</td>
-                <td>${escapeHtml(row.appId)}</td>
                 <td>${escapeHtml(row.clientId)}</td>
-                <td>${row.lat}</td>
-                <td>${row.lon}</td>
+                <td>${escapeHtml(row.clientSentAt)}</td>
+                <td>${escapeHtml(row.clientReceivedAt)}</td>
+                <td>${escapeHtml(row.details)}</td>
                 <td>${row.rtt}</td>
               </tr>
             `;
@@ -340,29 +441,32 @@
           .replaceAll("'", '&#039;');
       }
 
-      function addLogRow({ ok, appId, clientId, lat, lon, rtt }) {
-        requestLog.unshift({
+      function addLogRow({ ok, mode, clientId, clientSentAt, clientReceivedAt, details, rtt }) {
+        const targetLog = mode === 'location' ? locationLog : latencyLog;
+
+        targetLog.unshift({
           ok,
-          appId,
           clientId,
-          lat: Number(lat).toFixed(6),
-          lon: Number(lon).toFixed(6),
+          clientSentAt,
+          clientReceivedAt,
+          details,
           rtt,
-          time: new Date().toLocaleTimeString(),
         });
 
-        if (requestLog.length > 100) {
-          requestLog.pop();
+        if (targetLog.length > 100) {
+          targetLog.pop();
         }
 
         updateLogTable();
       }
 
-      function validateInputs(clientId, lat, lon) {
+      function validateInputs(clientId) {
         if (!clientId || !clientId.trim()) {
           throw new Error('Client ID is required.');
         }
+      }
 
+      function validateLatLon(lat, lon) {
         const latNum = Number(lat);
         const lonNum = Number(lon);
 
@@ -376,6 +480,42 @@
 
         return { latNum, lonNum };
       }
+
+      function setActiveMode(mode) {
+        activeMode = mode;
+
+        const showLocation = mode === 'location';
+
+        locationPanel.classList.toggle('hidden', !showLocation);
+        latencyPanel.classList.toggle('hidden', showLocation);
+
+        tabLocation.classList.toggle('active', showLocation);
+        tabLatency.classList.toggle('active', !showLocation);
+
+        tabLocation.setAttribute('aria-selected', String(showLocation));
+        tabLatency.setAttribute('aria-selected', String(!showLocation));
+
+        clearStatus();
+      }
+
+      tabLocation.addEventListener('click', () => setActiveMode('location'));
+      tabLatency.addEventListener('click', () => setActiveMode('latency'));
+
+      function setActiveLogTab(mode) {
+        activeLogTab = mode;
+
+        const showLocationLog = mode === 'location';
+        logTabLocation.classList.toggle('active', showLocationLog);
+        logTabLatency.classList.toggle('active', !showLocationLog);
+
+        logTabLocation.setAttribute('aria-selected', String(showLocationLog));
+        logTabLatency.setAttribute('aria-selected', String(!showLocationLog));
+
+        updateLogTable();
+      }
+
+      logTabLocation.addEventListener('click', () => setActiveLogTab('location'));
+      logTabLatency.addEventListener('click', () => setActiveLogTab('latency'));
 
       getLocationBtn.addEventListener('click', async () => {
         clearStatus();
@@ -412,11 +552,11 @@
         );
       });
 
-      form.addEventListener('submit', async (event) => {
+      locationForm.addEventListener('submit', async (event) => {
         event.preventDefault();
         clearStatus();
 
-        const clientId = clientIdInput.value.trim();
+        const clientId = locationClientIdInput.value.trim();
         const lat = latInput.value;
         const lon = lonInput.value;
 
@@ -424,36 +564,115 @@
         let lonNum;
 
         try {
-          ({ latNum, lonNum } = validateInputs(clientId, lat, lon));
+          validateInputs(clientId);
+          ({ latNum, lonNum } = validateLatLon(lat, lon));
         } catch (error) {
           setStatus(error.message || 'Invalid input.', 'error');
           return;
         }
 
+        const clientSentAt = new Date().toISOString();
+
         const payload = {
           app_id: APP_ID,
           client_id: clientId,
-          timestamp: new Date().toISOString(),
+          timestamp: clientSentAt,
           location: {
             lat: latNum,
             lon: lonNum,
           },
         };
 
-        submitBtn.disabled = true;
+        locationSubmitBtn.disabled = true;
         getLocationBtn.disabled = true;
         setStatus('Sending location update...', 'info');
 
         const start = performance.now();
-        let ok = false;
 
         try {
-          const response = await fetch(ENDPOINT, {
+          const response = await fetch(LOCATION_ENDPOINT, {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
             },
             body: JSON.stringify(payload),
+          });
+
+          const rtt = Math.round(performance.now() - start);
+          let responseBody = null;
+          try {
+            responseBody = await response.json();
+          } catch {
+            responseBody = null;
+          }
+
+          const clientReceivedAt = new Date().toISOString();
+
+          addLogRow({
+            ok: response.ok,
+            mode: 'location',
+            clientId,
+            clientSentAt,
+            clientReceivedAt,
+            details: `${latNum.toFixed(6)}, ${lonNum.toFixed(6)}`,
+            rtt,
+          });
+
+          if (response.ok) {
+            setStatus(`Location update successful. RTT: ${rtt} ms.`, 'success');
+          } else {
+            const message = responseBody?.message || `Request failed with status ${response.status}.`;
+            setStatus(`${message} RTT: ${rtt} ms.`, 'error');
+          }
+        } catch (error) {
+          const rtt = Math.round(performance.now() - start);
+          const clientReceivedAt = new Date().toISOString();
+          addLogRow({
+            ok: false,
+            mode: 'location',
+            clientId,
+            clientSentAt,
+            clientReceivedAt,
+            details: `${Number(lat).toFixed(6)}, ${Number(lon).toFixed(6)}`,
+            rtt,
+          });
+          setStatus(`Network error: ${error.message || 'Request failed'}. RTT: ${rtt} ms.`, 'error');
+        } finally {
+          locationSubmitBtn.disabled = false;
+          getLocationBtn.disabled = false;
+        }
+      });
+
+      latencyForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        clearStatus();
+
+        const clientId = latencyClientIdInput.value.trim();
+        const seq = seqInput.value.trim();
+
+        try {
+          validateInputs(clientId);
+        } catch (error) {
+          setStatus(error.message || 'Invalid input.', 'error');
+          return;
+        }
+
+        const clientSentAt = new Date().toISOString();
+        const requestUrl = new URL(LATENCY_ENDPOINT);
+        requestUrl.searchParams.set('client_sent_at', clientSentAt);
+        requestUrl.searchParams.set('client_id', clientId);
+        if (seq) {
+          requestUrl.searchParams.set('seq', seq);
+        }
+
+        latencySubmitBtn.disabled = true;
+        setStatus('Sending latency probe...', 'info');
+
+        const start = performance.now();
+
+        try {
+          const response = await fetch(requestUrl.toString(), {
+            method: 'GET',
           });
 
           const rtt = Math.round(performance.now() - start);
@@ -465,40 +684,44 @@
             responseBody = null;
           }
 
-          ok = response.ok;
+          const clientReceivedAt = new Date().toISOString();
 
           addLogRow({
-            ok,
-            appId: APP_ID,
+            ok: response.ok,
+            mode: 'latency',
             clientId,
-            lat: latNum,
-            lon: lonNum,
+            clientSentAt,
+            clientReceivedAt,
+            details: `${responseBody?.server_received_timestamp || '-'} | ${responseBody?.server_response_timestamp || '-'}`,
             rtt,
           });
 
           if (response.ok) {
-            setStatus(`Update sent successfully. RTT: ${rtt} ms.`, 'success');
+            setStatus(`Latency probe successful. RTT: ${rtt} ms.`, 'success');
           } else {
             const message = responseBody?.message || `Request failed with status ${response.status}.`;
             setStatus(`${message} RTT: ${rtt} ms.`, 'error');
           }
         } catch (error) {
           const rtt = Math.round(performance.now() - start);
+          const clientReceivedAt = new Date().toISOString();
           addLogRow({
             ok: false,
-            appId: APP_ID,
+            mode: 'latency',
             clientId,
-            lat: latNum,
-            lon: lonNum,
+            clientSentAt,
+            clientReceivedAt,
+            details: '- | -',
             rtt,
           });
           setStatus(`Network error: ${error.message || 'Request failed'}. RTT: ${rtt} ms.`, 'error');
         } finally {
-          submitBtn.disabled = false;
-          getLocationBtn.disabled = false;
+          latencySubmitBtn.disabled = false;
         }
       });
 
+      setActiveMode(activeMode);
+      setActiveLogTab(activeLogTab);
       updateLogTable();
     </script>
   </body>

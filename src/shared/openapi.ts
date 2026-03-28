@@ -1,11 +1,51 @@
 import { OpenAPIRegistry, OpenApiGeneratorV3 } from '@asteasolutions/zod-to-openapi';
+import { z } from 'zod';
 import {
   AckResponseSchema,
   HealthResponseSchema,
   LocationUpdateRequestSchema,
 } from './schemas/location';
+import { LatencyProbeResponseSchema } from './schemas/latency';
 
 const registry = new OpenAPIRegistry();
+
+registry.registerPath({
+  method: 'get',
+  path: '/v1/client/latency',
+  summary: 'Client latency probe',
+  description:
+    'Returns server-side timestamps and request metadata useful for end-to-end latency tests.',
+  request: {
+    query: z
+      .object({
+        client_sent_at: z
+          .string()
+          .optional()
+          .openapi({
+            description: 'Optional client timestamp for RTT calculations.',
+            example: '2026-03-28T14:40:01.095Z',
+          }),
+        seq: z
+          .string()
+          .optional()
+          .openapi({
+            description: 'Optional sequence id echoed in the response.',
+            example: '42',
+          }),
+      })
+      .openapi('LatencyProbeQuery'),
+  },
+  responses: {
+    200: {
+      description: 'Latency probe response.',
+      content: {
+        'application/json': {
+          schema: LatencyProbeResponseSchema,
+        },
+      },
+    },
+  },
+});
 
 registry.registerPath({
   method: 'post',
