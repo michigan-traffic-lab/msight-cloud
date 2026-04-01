@@ -1,0 +1,1420 @@
+{
+  "/MsightCloudStack/MsightVpc": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "maxAzs": "*",
+        "natGateways": "*",
+        "subnetConfiguration": [
+          {
+            "name": "*",
+            "subnetType": "Public"
+          },
+          {
+            "name": "*",
+            "subnetType": "Isolated"
+          },
+          {
+            "name": "*",
+            "subnetType": "Isolated"
+          }
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/Custom::VpcRestrictDefaultSGCustomResourceProvider": [
+    {
+      "type": "aws:cdk:is-custom-resource-handler-customResourceProvider",
+      "data": true
+    }
+  ],
+  "/MsightCloudStack/MsightLambdaSg": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "vpc": "*",
+        "allowAllOutbound": true,
+        "description": "*",
+        "securityGroupName": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "addIngressRule": [
+          {
+            "canInlineRule": true,
+            "connections": "*",
+            "uniqueId": "*"
+          },
+          {},
+          "*",
+          false
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightProxySg": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "vpc": "*",
+        "allowAllOutbound": true,
+        "description": "*",
+        "securityGroupName": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "addIngressRule": [
+          "*",
+          {},
+          "*"
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "addEgressRule": [
+          "*",
+          {},
+          "*",
+          true
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightDbSg": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "vpc": "*",
+        "allowAllOutbound": true,
+        "description": "*",
+        "securityGroupName": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "addIngressRule": [
+          "*",
+          {},
+          "*"
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "addIngressRule": [
+          "*",
+          {},
+          "*",
+          false
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightCacheSg": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "vpc": "*",
+        "allowAllOutbound": true,
+        "description": "*",
+        "securityGroupName": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "addIngressRule": [
+          "*",
+          {},
+          "*"
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightCacheSubnetGroup": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightCacheSubnetGroup"
+    }
+  ],
+  "/MsightCloudStack/MsightCacheCluster": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightCacheCluster"
+    }
+  ],
+  "/MsightCloudStack/MsightAurora": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "engine": {
+          "engineType": "*",
+          "engineVersion": {
+            "fullVersion": "*",
+            "majorVersion": "*"
+          },
+          "parameterGroupFamily": "*",
+          "singleUserRotationApplication": "*",
+          "engineFamily": "*",
+          "defaultUsername": "*",
+          "supportedLogTypes": "*"
+        },
+        "writer": "*",
+        "serverlessV2MinCapacity": "*",
+        "serverlessV2MaxCapacity": "*",
+        "credentials": "*",
+        "defaultDatabaseName": "*",
+        "vpc": "*",
+        "vpcSubnets": {
+          "subnetType": "Isolated"
+        },
+        "securityGroups": [
+          "*"
+        ],
+        "enableDataApi": true,
+        "storageEncrypted": true,
+        "removalPolicy": "destroy",
+        "deletionProtection": false
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightProxy": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "proxyTarget": "*",
+        "secrets": [
+          "*"
+        ],
+        "vpc": "*",
+        "securityGroups": [
+          "*"
+        ],
+        "requireTLS": true,
+        "dbProxyName": "*",
+        "vpcSubnets": {
+          "subnetType": "Isolated"
+        }
+      }
+    }
+  ],
+  "/MsightCloudStack/SecretsManagerVpcEndpoint": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "vpc": "*",
+        "service": {
+          "name": "*",
+          "port": "*",
+          "privateDnsDefault": true
+        },
+        "subnets": {
+          "subnetType": "Isolated"
+        },
+        "securityGroups": [
+          "*"
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/LocationLambda": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "runtime": "*",
+        "memorySize": "*",
+        "timeout": "*",
+        "vpc": "*",
+        "vpcSubnets": {
+          "subnetType": "Isolated"
+        },
+        "securityGroups": [
+          "*"
+        ],
+        "bundling": {
+          "minify": true,
+          "sourceMap": false,
+          "target": "*"
+        },
+        "entry": "*",
+        "handler": "*",
+        "environment": "*",
+        "code": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "runtime": "*",
+        "memorySize": "*",
+        "timeout": "*",
+        "vpc": "*",
+        "vpcSubnets": {
+          "subnetType": "Isolated"
+        },
+        "securityGroups": [
+          "*"
+        ],
+        "bundling": {
+          "minify": true,
+          "sourceMap": false,
+          "target": "*"
+        },
+        "entry": "*",
+        "handler": "*",
+        "environment": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/SystemLambda": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "runtime": "*",
+        "memorySize": "*",
+        "timeout": "*",
+        "vpc": "*",
+        "vpcSubnets": {
+          "subnetType": "Isolated"
+        },
+        "securityGroups": [
+          "*"
+        ],
+        "bundling": {
+          "minify": true,
+          "sourceMap": false,
+          "target": "*"
+        },
+        "entry": "*",
+        "handler": "*",
+        "environment": "*",
+        "code": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "runtime": "*",
+        "memorySize": "*",
+        "timeout": "*",
+        "vpc": "*",
+        "vpcSubnets": {
+          "subnetType": "Isolated"
+        },
+        "securityGroups": [
+          "*"
+        ],
+        "bundling": {
+          "minify": true,
+          "sourceMap": false,
+          "target": "*"
+        },
+        "entry": "*",
+        "handler": "*",
+        "environment": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/LatencyLambda": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "runtime": "*",
+        "memorySize": "*",
+        "timeout": "*",
+        "vpc": "*",
+        "vpcSubnets": {
+          "subnetType": "Isolated"
+        },
+        "securityGroups": [
+          "*"
+        ],
+        "bundling": {
+          "minify": true,
+          "sourceMap": false,
+          "target": "*"
+        },
+        "entry": "*",
+        "handler": "*",
+        "environment": "*",
+        "code": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    },
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "runtime": "*",
+        "memorySize": "*",
+        "timeout": "*",
+        "vpc": "*",
+        "vpcSubnets": {
+          "subnetType": "Isolated"
+        },
+        "securityGroups": [
+          "*"
+        ],
+        "bundling": {
+          "minify": true,
+          "sourceMap": false,
+          "target": "*"
+        },
+        "entry": "*",
+        "handler": "*",
+        "environment": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": "*"
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": "*"
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": "*"
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": "*"
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": "*"
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/HttpApiUrl": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "HttpApiUrl"
+    }
+  ],
+  "/MsightCloudStack/DbProxyEndpoint": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "DbProxyEndpoint"
+    }
+  ],
+  "/MsightCloudStack/DbSecretArn": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "DbSecretArn"
+    }
+  ],
+  "/MsightCloudStack/DbClusterArn": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "DbClusterArn"
+    }
+  ],
+  "/MsightCloudStack/DbInitCommand": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "DbInitCommand"
+    }
+  ],
+  "/MsightCloudStack/BootstrapVersion": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "BootstrapVersion"
+    }
+  ],
+  "/MsightCloudStack/CheckBootstrapVersion": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "CheckBootstrapVersion"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpc52901217"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/publicSubnet1": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": true,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": true,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/publicSubnet2": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": true,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": true,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {}
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/appSubnet1": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": false,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": false,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/appSubnet2": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": false,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": false,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/dbSubnet1": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": false,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": false,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/dbSubnet2": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": false,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "availabilityZone": "*",
+        "vpcId": "*",
+        "cidrBlock": "*",
+        "mapPublicIpOnLaunch": false,
+        "ipv6CidrBlock": "*",
+        "assignIpv6AddressOnCreation": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/IGW": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcIGW6CD3CBFF"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/VPCGW": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcVPCGWF01E47B6"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/RestrictDefaultSecurityGroupCustomResource": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/Custom::VpcRestrictDefaultSGCustomResourceProvider/Role": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "CustomVpcRestrictDefaultSGCustomResourceProviderRole26592FE0"
+    }
+  ],
+  "/MsightCloudStack/Custom::VpcRestrictDefaultSGCustomResourceProvider/Handler": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "CustomVpcRestrictDefaultSGCustomResourceProviderHandlerDC833E5E"
+    }
+  ],
+  "/MsightCloudStack/MsightLambdaSg/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightLambdaSg05C2EDD9"
+    }
+  ],
+  "/MsightCloudStack/MsightProxySg/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightProxySg5ACE7239"
+    }
+  ],
+  "/MsightCloudStack/MsightProxySg/from MsightCloudStackMsightLambdaSgBD01DFF8:5432": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightProxySgfromMsightCloudStackMsightLambdaSgBD01DFF854327DF8DA13"
+    }
+  ],
+  "/MsightCloudStack/MsightDbSg/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightDbSgC210D36D"
+    }
+  ],
+  "/MsightCloudStack/MsightDbSg/from MsightCloudStackMsightProxySgC83EB970:5432": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightDbSgfromMsightCloudStackMsightProxySgC83EB9705432C631448D"
+    }
+  ],
+  "/MsightCloudStack/MsightDbSg/from MsightCloudStackMsightProxySgC83EB970:{IndirectPort}": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightDbSgfromMsightCloudStackMsightProxySgC83EB970IndirectPort70D9E4B3"
+    }
+  ],
+  "/MsightCloudStack/MsightCacheSg/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightCacheSgA971FE4C"
+    }
+  ],
+  "/MsightCloudStack/MsightCacheSg/from MsightCloudStackMsightLambdaSgBD01DFF8:6379": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightCacheSgfromMsightCloudStackMsightLambdaSgBD01DFF863790D0320A5"
+    }
+  ],
+  "/MsightCloudStack/MsightAurora/Subnets": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "description": "*",
+        "vpc": "*",
+        "vpcSubnets": {
+          "subnetType": "Isolated"
+        },
+        "removalPolicy": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightAurora/Secret": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "encryptionKey": "*",
+        "secretName": "*",
+        "replicaRegions": "*"
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "username": "*",
+        "secretName": "*",
+        "encryptionKey": "*",
+        "excludeCharacters": "*",
+        "replaceOnPasswordCriteriaChanges": true,
+        "replicaRegions": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightAurora/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightAuroraE9D0FDC0"
+    }
+  ],
+  "/MsightCloudStack/MsightAurora/writer": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/MsightProxy/IAMRole": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "assumedBy": {
+          "principalAccount": "*",
+          "assumeRoleAction": "*"
+        }
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "addToPrincipalPolicy": [
+          {}
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "attachInlinePolicy": [
+          "*"
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "attachInlinePolicy": [
+          "*"
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightProxy/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightProxyF785E2DA"
+    }
+  ],
+  "/MsightCloudStack/MsightProxy/ProxyTargetGroup": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightProxyProxyTargetGroup0F2248DB"
+    }
+  ],
+  "/MsightCloudStack/SecretsManagerVpcEndpoint/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "SecretsManagerVpcEndpoint43ED3596"
+    }
+  ],
+  "/MsightCloudStack/LocationLambda/ServiceRole": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "assumedBy": {
+          "principalAccount": "*",
+          "assumeRoleAction": "*"
+        },
+        "managedPolicies": [
+          {
+            "managedPolicyArn": "*"
+          },
+          {
+            "managedPolicyArn": "*"
+          }
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "addToPrincipalPolicy": [
+          {}
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "attachInlinePolicy": [
+          "*"
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "attachInlinePolicy": [
+          "*"
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/LocationLambda/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "LocationLambda0E7B39F0"
+    }
+  ],
+  "/MsightCloudStack/LocationLambda/LogGroup": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "logGroupName": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/SystemLambda/ServiceRole": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "assumedBy": {
+          "principalAccount": "*",
+          "assumeRoleAction": "*"
+        },
+        "managedPolicies": [
+          {
+            "managedPolicyArn": "*"
+          },
+          {
+            "managedPolicyArn": "*"
+          }
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/SystemLambda/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "SystemLambda52589B81"
+    }
+  ],
+  "/MsightCloudStack/SystemLambda/LogGroup": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "logGroupName": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/LatencyLambda/ServiceRole": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "assumedBy": {
+          "principalAccount": "*",
+          "assumeRoleAction": "*"
+        },
+        "managedPolicies": [
+          {
+            "managedPolicyArn": "*"
+          },
+          {
+            "managedPolicyArn": "*"
+          }
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/LatencyLambda/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "LatencyLambda7BA03A7D"
+    }
+  ],
+  "/MsightCloudStack/LatencyLambda/LogGroup": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "logGroupName": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiD0A50F1B"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/DefaultStage": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/POST--v1--clients--location--update": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--v1--clients--location--health": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--openapi.json": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--health": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--version": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--v1--client--latency": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/CDKMetadata/Default": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "CDKMetadata"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/publicSubnet1/Subnet": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcpublicSubnet1Subnet8D2AEF6A"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/publicSubnet1/RouteTable": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcpublicSubnet1RouteTable7C10C6A4"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/publicSubnet1/RouteTableAssociation": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcpublicSubnet1RouteTableAssociationCFF4810C"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/publicSubnet1/DefaultRoute": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcpublicSubnet1DefaultRouteBE8A2A3F"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/publicSubnet2/Subnet": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcpublicSubnet2Subnet7B773FCE"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/publicSubnet2/RouteTable": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcpublicSubnet2RouteTableA689EF7A"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/publicSubnet2/RouteTableAssociation": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcpublicSubnet2RouteTableAssociation6C7C0BC3"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/publicSubnet2/DefaultRoute": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcpublicSubnet2DefaultRoute1EEBD2F0"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/appSubnet1/Subnet": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcappSubnet1Subnet579714B0"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/appSubnet1/RouteTable": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcappSubnet1RouteTableEC22A40C"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/appSubnet1/RouteTableAssociation": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcappSubnet1RouteTableAssociation95FFAB0C"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/appSubnet2/Subnet": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcappSubnet2Subnet1861BDE1"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/appSubnet2/RouteTable": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcappSubnet2RouteTable06005608"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/appSubnet2/RouteTableAssociation": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcappSubnet2RouteTableAssociationA75A9726"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/dbSubnet1/Subnet": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcdbSubnet1Subnet9370D48B"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/dbSubnet1/RouteTable": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcdbSubnet1RouteTableA1CDA7D9"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/dbSubnet1/RouteTableAssociation": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcdbSubnet1RouteTableAssociation3C41324F"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/dbSubnet2/Subnet": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcdbSubnet2Subnet85C849FD"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/dbSubnet2/RouteTable": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcdbSubnet2RouteTable5905BF54"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/dbSubnet2/RouteTableAssociation": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcdbSubnet2RouteTableAssociation1824FE1D"
+    }
+  ],
+  "/MsightCloudStack/MsightVpc/RestrictDefaultSecurityGroupCustomResource/Default": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightVpcRestrictDefaultSecurityGroupCustomResource380A411A"
+    }
+  ],
+  "/MsightCloudStack/MsightAurora/Subnets/Default": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightAuroraSubnets84C92F05"
+    }
+  ],
+  "/MsightCloudStack/MsightAurora/Secret/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightCloudStackMsightAuroraSecret6F39F6763fdaad7efa858a3daf9490cf0a702aeb"
+    }
+  ],
+  "/MsightCloudStack/MsightAurora/Secret/Attachment": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": {
+        "secret": "*",
+        "target": "*"
+      }
+    }
+  ],
+  "/MsightCloudStack/MsightAurora/writer/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightAurorawriterBCE8560A"
+    }
+  ],
+  "/MsightCloudStack/MsightProxy/IAMRole/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightProxyIAMRole487FB16A"
+    }
+  ],
+  "/MsightCloudStack/MsightProxy/IAMRole/DefaultPolicy": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "attachToRole": [
+          "*"
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "attachToRole": [
+          "*"
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "addStatements": [
+          {}
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/LocationLambda/ServiceRole/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "LocationLambdaServiceRole69544B5B"
+    }
+  ],
+  "/MsightCloudStack/LocationLambda/ServiceRole/DefaultPolicy": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "attachToRole": [
+          "*"
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "attachToRole": [
+          "*"
+        ]
+      }
+    },
+    {
+      "type": "aws:cdk:analytics:method",
+      "data": {
+        "addStatements": [
+          {}
+        ]
+      }
+    }
+  ],
+  "/MsightCloudStack/LocationLambda/Code/AssetBucket": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/LocationLambda/LogGroup/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "LocationLambdaLogGroup3E955026"
+    }
+  ],
+  "/MsightCloudStack/SystemLambda/ServiceRole/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "SystemLambdaServiceRole9C559CC5"
+    }
+  ],
+  "/MsightCloudStack/SystemLambda/Code/AssetBucket": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/SystemLambda/LogGroup/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "SystemLambdaLogGroup4C5087E0"
+    }
+  ],
+  "/MsightCloudStack/LatencyLambda/ServiceRole/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "LatencyLambdaServiceRole5CCB6A7D"
+    }
+  ],
+  "/MsightCloudStack/LatencyLambda/Code/AssetBucket": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/LatencyLambda/LogGroup/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "LatencyLambdaLogGroup67D7589C"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/DefaultStage/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiDefaultStageE39A02A7"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/POST--v1--clients--location--update/LocationLambdaIntegration": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/POST--v1--clients--location--update/LocationLambdaIntegration-Permission": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiPOSTv1clientslocationupdateLocationLambdaIntegrationPermissionB22A8620"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/POST--v1--clients--location--update/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiPOSTv1clientslocationupdateEF5E2251"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--v1--clients--location--health/LocationLambdaIntegration-Permission": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETv1clientslocationhealthLocationLambdaIntegrationPermissionF5CC1F9E"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--v1--clients--location--health/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETv1clientslocationhealthA2F8D238"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--openapi.json/SystemLambdaIntegration": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--openapi.json/SystemLambdaIntegration-Permission": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETsystemopenapijsonSystemLambdaIntegrationPermission2712F07C"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--openapi.json/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETsystemopenapijson8D5A7A67"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--health/SystemLambdaIntegration-Permission": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETsystemhealthSystemLambdaIntegrationPermissionF8E02E1C"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--health/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETsystemhealth507A973A"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--version/SystemLambdaIntegration-Permission": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETsystemversionSystemLambdaIntegrationPermission49519216"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--version/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETsystemversion56DE8EF5"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--v1--client--latency/LatencyLambdaIntegration": [
+    {
+      "type": "aws:cdk:analytics:construct",
+      "data": "*"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--v1--client--latency/LatencyLambdaIntegration-Permission": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETv1clientlatencyLatencyLambdaIntegrationPermission3B50E1B6"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--v1--client--latency/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETv1clientlatencyA27AF3BE"
+    }
+  ],
+  "/MsightCloudStack/MsightAurora/Secret/Attachment/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightAuroraSecretAttachmentD585F689"
+    }
+  ],
+  "/MsightCloudStack/MsightProxy/IAMRole/DefaultPolicy/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightProxyIAMRoleDefaultPolicyBA5258E9"
+    }
+  ],
+  "/MsightCloudStack/LocationLambda/ServiceRole/DefaultPolicy/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "LocationLambdaServiceRoleDefaultPolicy08CD52DD"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/POST--v1--clients--location--update/LocationLambdaIntegration/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiPOSTv1clientslocationupdateLocationLambdaIntegration40DF202E"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--system--openapi.json/SystemLambdaIntegration/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETsystemopenapijsonSystemLambdaIntegrationBF08265C"
+    }
+  ],
+  "/MsightCloudStack/MsightHttpApi/GET--v1--client--latency/LatencyLambdaIntegration/Resource": [
+    {
+      "type": "aws:cdk:logicalId",
+      "data": "MsightHttpApiGETv1clientlatencyLatencyLambdaIntegrationEE739AE5"
+    }
+  ]
+}

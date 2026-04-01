@@ -3,9 +3,25 @@ import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
 
 extendZodWithOpenApi(z);
 
+export const LatencyBackendProbeSchema = z
+  .object({
+    status: z.enum(['ok', 'error']).openapi({
+      example: 'ok',
+    }),
+    latency_ms: z.number().nonnegative().nullable().openapi({
+      example: 12.4,
+      description: 'Measured backend round-trip latency in milliseconds.',
+    }),
+    error: z.string().optional().openapi({
+      example: 'connect ETIMEDOUT 10.0.1.15:6379',
+      description: 'Present only when the backend probe fails.',
+    }),
+  })
+  .openapi('LatencyBackendProbe');
+
 export const LatencyProbeResponseSchema = z
   .object({
-    status: z.enum(['ok']).openapi({
+    status: z.enum(['ok', 'degraded']).openapi({
       example: 'ok',
     }),
     message: z.string().openapi({
@@ -62,6 +78,12 @@ export const LatencyProbeResponseSchema = z
         }),
       })
       .openapi('LatencyEcho'),
+    probes: z
+      .object({
+        valkey: LatencyBackendProbeSchema,
+        postgresql: LatencyBackendProbeSchema,
+      })
+      .openapi('LatencyBackendProbes'),
   })
   .openapi('LatencyProbeResponse');
 

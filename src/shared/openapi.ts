@@ -6,6 +6,7 @@ import {
   LocationUpdateRequestSchema,
 } from './schemas/location';
 import { LatencyProbeResponseSchema } from './schemas/latency';
+import { VersionResponseSchema } from './schemas/system';
 
 const registry = new OpenAPIRegistry();
 
@@ -14,7 +15,7 @@ registry.registerPath({
   path: '/v1/client/latency',
   summary: 'Client latency probe',
   description:
-    'Returns server-side timestamps and request metadata useful for end-to-end latency tests.',
+    'Returns server-side timestamps, request metadata, and concurrent Valkey and PostgreSQL latency measurements.',
   request: {
     query: z
       .object({
@@ -128,6 +129,11 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Current deployed build identifier and metadata.',
+      content: {
+        'application/json': {
+          schema: VersionResponseSchema,
+        },
+      },
     },
   },
 });

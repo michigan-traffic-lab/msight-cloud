@@ -3,6 +3,7 @@ import { Construct } from 'constructs';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as elasticache from 'aws-cdk-lib/aws-elasticache';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -68,16 +69,11 @@ export class MsightCloudStack extends cdk.Stack {
     super(scope, id, props);
 
     const buildId = computeBuildId();
-    const deploymentMode = this.node.tryGetContext('deploymentMode') ?? 'standard';
-    const isExtremeLatencyMode = deploymentMode === 'extreme-latency';
     const preferredAz = this.node.tryGetContext('preferredAz');
-    // TODO: organize this better
-    const appSubnetType = isExtremeLatencyMode
-      ? ec2.SubnetType.PRIVATE_ISOLATED
-      : ec2.SubnetType.PRIVATE_WITH_EGRESS;
+    const appSubnetType = ec2.SubnetType.PRIVATE_ISOLATED;
     const hasPreferredAz = typeof preferredAz === 'string' && preferredAz.length > 0;
     const appSubnetSelection: ec2.SubnetSelection =
-      isExtremeLatencyMode && hasPreferredAz
+      hasPreferredAz
         ? { subnetType: appSubnetType, availabilityZones: [preferredAz] }
         : { subnetType: appSubnetType };
     const multiAzAppSubnetSelection: ec2.SubnetSelection = {
@@ -89,7 +85,7 @@ export class MsightCloudStack extends cdk.Stack {
     // -------------------------
     const vpc = new ec2.Vpc(this, 'MsightVpc', {
       maxAzs: 2,
-      natGateways: isExtremeLatencyMode ? 0 : 1,
+      natGateways: 0,
       subnetConfiguration: [
         {
           name: 'public',
@@ -130,11 +126,62 @@ export class MsightCloudStack extends cdk.Stack {
       securityGroupName: 'msight-db-sg',
     });
 
+    const cacheSg = new ec2.SecurityGroup(this, 'MsightCacheSg', {
+      vpc,
+      allowAllOutbound: true,
+      description: 'MSight ElastiCache Security Group',
+      securityGroupName: 'msight-cache-sg',
+    });
+
     // Lambda -> Proxy
     proxySg.addIngressRule(lambdaSg, ec2.Port.tcp(5432), 'Lambda to Proxy');
 
+    // Lambda -> ElastiCache
+    cacheSg.addIngressRule(lambdaSg, ec2.Port.tcp(6379), 'Lambda to ElastiCache');
+
     // Proxy -> DB
     dbSg.addIngressRule(proxySg, ec2.Port.tcp(5432), 'Proxy to Aurora');
+
+    const preferredAppSubnetSelection: ec2.SubnetSelection = hasPreferredAz
+      ? { subnetGroupName: 'app', availabilityZones: [preferredAz] }
+      : { subnetGroupName: 'app' };
+    const appSubnets = vpc.selectSubnets({ subnetGroupName: 'app' });
+    const preferredAppSubnets = vpc.selectSubnets(preferredAppSubnetSelection);
+    const cacheSubnetIds = hasPreferredAz
+      ? preferredAppSubnets.subnetIds
+      : [appSubnets.subnetIds[0]];
+    const cachePreferredAz = hasPreferredAz
+      ? preferredAz
+      : appSubnets.subnets[0].availabilityZone;
+
+    // -------------------------
+    // ElastiCache Valkey
+    // -------------------------
+    const cacheSubnetGroup = new elasticache.CfnSubnetGroup(this, 'MsightCacheSubnetGroup', {
+      description: 'MSight ElastiCache subnet group',
+      cacheSubnetGroupName: 'msight-cache-subnet-group',
+      subnetIds: cacheSubnetIds,
+    });
+
+    const cacheReplicationGroup = new elasticache.CfnReplicationGroup(this, 'MsightCacheCluster', {
+      atRestEncryptionEnabled: true,
+      automaticFailoverEnabled: false,
+      autoMinorVersionUpgrade: true,
+      cacheNodeType: 'cache.t4g.small',
+      cacheSubnetGroupName: cacheSubnetGroup.ref,
+      engine: 'valkey',
+      engineVersion: '8.2',
+      multiAzEnabled: false,
+      numCacheClusters: 1,
+      port: 6379,
+      preferredCacheClusterAZs: [cachePreferredAz],
+      replicationGroupDescription: 'MSight temporary location cache',
+      replicationGroupId: 'msight-cache',
+      securityGroupIds: [cacheSg.securityGroupId],
+      transitEncryptionEnabled: true,
+    });
+
+    cacheReplicationGroup.addDependency(cacheSubnetGroup);
 
     // -------------------------
     // Aurora PostgreSQL
@@ -170,15 +217,13 @@ export class MsightCloudStack extends cdk.Stack {
       vpcSubnets: multiAzAppSubnetSelection,
     });
 
-    if (isExtremeLatencyMode) {
-      // Keep Secrets Manager calls on private AWS network when NAT is disabled.
-      new ec2.InterfaceVpcEndpoint(this, 'SecretsManagerVpcEndpoint', {
-        vpc,
-        service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
-        subnets: appSubnetSelection,
-        securityGroups: [lambdaSg],
-      });
-    }
+    // Keep Secrets Manager calls on private AWS network when NAT is disabled.
+    new ec2.InterfaceVpcEndpoint(this, 'SecretsManagerVpcEndpoint', {
+      vpc,
+      service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+      subnets: appSubnetSelection,
+      securityGroups: [lambdaSg],
+    });
 
     // -------------------------
     // Lambda Common Config
@@ -243,8 +288,17 @@ export class MsightCloudStack extends cdk.Stack {
         API_VERSION: 'v1',
         SERVICE_NAME: 'latency-api',
         BUILD_ID: buildId,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+        DB_HOST: proxy.endpoint,
+        DB_PORT: '5432',
+        DB_NAME: 'msight',
+        DB_SECRET_ARN: cluster.secret!.secretArn,
       },
     });
+
+    cluster.secret!.grantRead(latencyLambda);
 
     // -------------------------
     // API Gateway

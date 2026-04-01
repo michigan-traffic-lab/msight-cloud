@@ -41,21 +41,20 @@ npx cdk diff MsightCloudStack --no-change-set
 npx cdk deploy MsightCloudStack --require-approval never
 ```
 
-### Optional: Extreme-Latency Single-AZ Mode
+### Preferred-AZ Low-Latency Deployment
 
-For latency benchmarking (reduced resilience), deploy with a single-AZ profile:
+This stack now always deploys with the extreme-latency layout. To pin the preferred AZ explicitly, pass `preferredAz`:
 
 ```bash
-npx cdk deploy MsightCloudStack --require-approval never -c deploymentMode=extreme-latency -c preferredAz=us-east-2a
+npx cdk deploy MsightCloudStack --require-approval never -c preferredAz=us-east-2a
 ```
 
-What this mode changes:
+What this deployment does:
 
 * Keeps VPC at 2 AZs (required by Aurora subnet coverage) and disables NAT gateways.
 * Places app subnets in isolated private subnets and pins Lambda placement to `preferredAz` when provided.
 * Keeps RDS Proxy subnet coverage across AZs to satisfy service requirements.
 * Adds a Secrets Manager VPC interface endpoint.
-* Keeps defaults unchanged when `deploymentMode` is not set.
 
 ### 5. Verify the deployed version
 

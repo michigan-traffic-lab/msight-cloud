@@ -1,0 +1,7 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "aws": true,
+        "npx.cmd": true,
+        "npm.cmd": true
+    }
+}

@@ -4,6 +4,7 @@ import type {
 } from 'aws-lambda';
 import { HealthResponseSchema } from '../../shared/schemas/location';
 import { buildOpenApiDocument } from '../../shared/openapi';
+import { VersionResponseSchema } from '../../shared/schemas/system';
 
 function jsonResponse(
   statusCode: number,
@@ -45,12 +46,14 @@ export async function handler(
   }
 
   if (method === 'GET' && path === '/system/version') {
-    return jsonResponse(200, {
+    const response = VersionResponseSchema.parse({
       service: serviceName,
       api_version: apiVersion,
       build_id: process.env.BUILD_ID ?? 'unknown',
       server_timestamp: new Date().toISOString(),
     });
+
+    return jsonResponse(200, response);
   }
 
   return jsonResponse(404, {

@@ -187,6 +187,17 @@
         font-size: 1.05rem;
       }
 
+      .metric-note {
+        margin: 0 0 12px;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: #f8fbff;
+        color: var(--muted);
+        font-size: 0.88rem;
+        line-height: 1.45;
+      }
+
       .table-wrap {
         overflow-x: auto;
       }
@@ -194,7 +205,7 @@
       table {
         width: 100%;
         border-collapse: collapse;
-        min-width: 620px;
+        min-width: 980px;
       }
 
       th, td {
@@ -342,6 +353,12 @@
           </button>
         </div>
 
+        <p class="metric-note">
+          <strong>Metric guide:</strong> Adjusted RTT is calculated as client receive minus client send minus server handling time.
+          Server handling time is the time spent inside the API, from server receive to server response.
+          Valkey and PostgreSQL columns show the backend probe latencies reported by the latency endpoint.
+        </p>
+
         <div class="table-wrap">
           <table>
             <thead>
@@ -350,13 +367,16 @@
                 <th>Client ID</th>
                 <th>Client Sent</th>
                 <th>Client Received</th>
+                <th>Server Handling (ms)</th>
+                <th>Valkey (ms)</th>
+                <th>PostgreSQL (ms)</th>
+                <th>Adjusted RTT (ms)</th>
                 <th>Details</th>
-                <th>RTT (ms)</th>
               </tr>
             </thead>
             <tbody id="logTableBody">
               <tr>
-                <td colspan="6" class="small">No requests yet.</td>
+                <td colspan="9" class="small">No requests yet.</td>
               </tr>
             </tbody>
           </table>
@@ -396,6 +416,42 @@
       let activeMode = 'location';
       let activeLogTab = 'location';
 
+      function parseIsoMs(value) {
+        if (!value) {
+          return null;
+        }
+
+        const epochMs = Date.parse(value);
+        return Number.isNaN(epochMs) ? null : epochMs;
+      }
+
+      function formatMetric(value) {
+        return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(3) : '-';
+      }
+
+      function computeServerHandlingMs(serverReceivedAt, serverResponseAt) {
+        const receivedMs = parseIsoMs(serverReceivedAt);
+        const responseMs = parseIsoMs(serverResponseAt);
+
+        if (receivedMs === null || responseMs === null) {
+          return null;
+        }
+
+        return responseMs - receivedMs;
+      }
+
+      function computeAdjustedRttMs(clientSentAt, clientReceivedAt, serverReceivedAt, serverResponseAt) {
+        const sentMs = parseIsoMs(clientSentAt);
+        const receivedMs = parseIsoMs(clientReceivedAt);
+        const serverHandlingMs = computeServerHandlingMs(serverReceivedAt, serverResponseAt);
+
+        if (sentMs === null || receivedMs === null || serverHandlingMs === null) {
+          return null;
+        }
+
+        return receivedMs - sentMs - serverHandlingMs;
+      }
+
       function setStatus(message, type = 'info') {
         statusBox.textContent = message;
         statusBox.className = `status show ${type}`;
@@ -411,7 +467,7 @@
         logCount.textContent = `${currentLog.length} record${currentLog.length === 1 ? '' : 's'}`;
 
         if (currentLog.length === 0) {
-          logTableBody.innerHTML = '<tr><td colspan="6" class="small">No requests yet.</td></tr>';
+          logTableBody.innerHTML = '<tr><td colspan="9" class="small">No requests yet.</td></tr>';
           return;
         }
 
@@ -424,8 +480,11 @@
                 <td>${escapeHtml(row.clientId)}</td>
                 <td>${escapeHtml(row.clientSentAt)}</td>
                 <td>${escapeHtml(row.clientReceivedAt)}</td>
+                <td>${formatMetric(row.serverHandlingMs)}</td>
+                <td>${formatMetric(row.valkeyLatencyMs)}</td>
+                <td>${formatMetric(row.postgreSqlLatencyMs)}</td>
+                <td>${formatMetric(row.adjustedRttMs)}</td>
                 <td>${escapeHtml(row.details)}</td>
-                <td>${row.rtt}</td>
               </tr>
             `;
           })
@@ -441,7 +500,18 @@
           .replaceAll("'", '&#039;');
       }
 
-      function addLogRow({ ok, mode, clientId, clientSentAt, clientReceivedAt, details, rtt }) {
+      function addLogRow({
+        ok,
+        mode,
+        clientId,
+        clientSentAt,
+        clientReceivedAt,
+        details,
+        adjustedRttMs = null,
+        serverHandlingMs = null,
+        valkeyLatencyMs = null,
+        postgreSqlLatencyMs = null,
+      }) {
         const targetLog = mode === 'location' ? locationLog : latencyLog;
 
         targetLog.unshift({
@@ -450,7 +520,10 @@
           clientSentAt,
           clientReceivedAt,
           details,
-          rtt,
+          adjustedRttMs,
+          serverHandlingMs,
+          valkeyLatencyMs,
+          postgreSqlLatencyMs,
         });
 
         if (targetLog.length > 100) {
@@ -615,7 +688,7 @@
             clientSentAt,
             clientReceivedAt,
             details: `${latNum.toFixed(6)}, ${lonNum.toFixed(6)}`,
-            rtt,
+            adjustedRttMs: rtt,
           });
 
           if (response.ok) {
@@ -634,7 +707,7 @@
             clientSentAt,
             clientReceivedAt,
             details: `${Number(lat).toFixed(6)}, ${Number(lon).toFixed(6)}`,
-            rtt,
+            adjustedRttMs: rtt,
           });
           setStatus(`Network error: ${error.message || 'Request failed'}. RTT: ${rtt} ms.`, 'error');
         } finally {
@@ -675,8 +748,6 @@
             method: 'GET',
           });
 
-          const rtt = Math.round(performance.now() - start);
-
           let responseBody = null;
           try {
             responseBody = await response.json();
@@ -685,6 +756,30 @@
           }
 
           const clientReceivedAt = new Date().toISOString();
+          const serverReceivedAt = responseBody?.server_received_timestamp;
+          const serverResponseAt = responseBody?.server_response_timestamp;
+          const serverHandlingMs = computeServerHandlingMs(serverReceivedAt, serverResponseAt);
+          const adjustedRttMs = computeAdjustedRttMs(
+            clientSentAt,
+            clientReceivedAt,
+            serverReceivedAt,
+            serverResponseAt
+          );
+          const valkeyLatencyMs = responseBody?.probes?.valkey?.latency_ms ?? null;
+          const postgreSqlLatencyMs = responseBody?.probes?.postgresql?.latency_ms ?? null;
+          const detailParts = [
+            `server: ${serverReceivedAt || '-'} -> ${serverResponseAt || '-'}`,
+            `valkey: ${responseBody?.probes?.valkey?.status || '-'}`,
+            `postgresql: ${responseBody?.probes?.postgresql?.status || '-'}`,
+          ];
+
+          if (responseBody?.probes?.valkey?.error) {
+            detailParts.push(`valkey err: ${responseBody.probes.valkey.error}`);
+          }
+
+          if (responseBody?.probes?.postgresql?.error) {
+            detailParts.push(`postgres err: ${responseBody.probes.postgresql.error}`);
+          }
 
           addLogRow({
             ok: response.ok,
@@ -692,18 +787,26 @@
             clientId,
             clientSentAt,
             clientReceivedAt,
-            details: `${responseBody?.server_received_timestamp || '-'} | ${responseBody?.server_response_timestamp || '-'}`,
-            rtt,
+            details: detailParts.join(' | '),
+            adjustedRttMs,
+            serverHandlingMs,
+            valkeyLatencyMs,
+            postgreSqlLatencyMs,
           });
 
           if (response.ok) {
-            setStatus(`Latency probe successful. RTT: ${rtt} ms.`, 'success');
+            setStatus(
+              `Latency probe successful. Adjusted RTT: ${formatMetric(adjustedRttMs)} ms.`,
+              'success'
+            );
           } else {
             const message = responseBody?.message || `Request failed with status ${response.status}.`;
-            setStatus(`${message} RTT: ${rtt} ms.`, 'error');
+            setStatus(
+              `${message} Adjusted RTT: ${formatMetric(adjustedRttMs)} ms.`,
+              'error'
+            );
           }
         } catch (error) {
-          const rtt = Math.round(performance.now() - start);
           const clientReceivedAt = new Date().toISOString();
           addLogRow({
             ok: false,
@@ -712,9 +815,8 @@
             clientSentAt,
             clientReceivedAt,
             details: '- | -',
-            rtt,
           });
-          setStatus(`Network error: ${error.message || 'Request failed'}. RTT: ${rtt} ms.`, 'error');
+          setStatus(`Network error: ${error.message || 'Request failed'}.`, 'error');
         } finally {
           latencySubmitBtn.disabled = false;
         }
