@@ -70,6 +70,12 @@ export class MsightCloudStack extends cdk.Stack {
 
     const buildId = computeBuildId();
     const preferredAz = this.node.tryGetContext('preferredAz');
+    const debugModeContext = this.node.tryGetContext('debugMode');
+    const isDebugMode =
+      debugModeContext === true ||
+      debugModeContext === 'true' ||
+      debugModeContext === 1 ||
+      debugModeContext === '1';
     const appSubnetType = ec2.SubnetType.PRIVATE_ISOLATED;
     const hasPreferredAz = typeof preferredAz === 'string' && preferredAz.length > 0;
     const appSubnetSelection: ec2.SubnetSelection =
@@ -298,6 +304,24 @@ export class MsightCloudStack extends cdk.Stack {
 
     cluster.secret!.grantRead(latencyLambda);
 
+    let cacheDebugLambda: NodejsFunction | undefined;
+    if (isDebugMode) {
+      cacheDebugLambda = new NodejsFunction(this, 'CacheDebugLambda', {
+        ...commonLambdaProps,
+        entry: path.join(__dirname, '../src/functions/cache-debug/handler.ts'),
+        handler: 'handler',
+        timeout: cdk.Duration.seconds(20),
+        environment: {
+          API_VERSION: 'v1',
+          SERVICE_NAME: 'cache-debug',
+          BUILD_ID: buildId,
+          CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+          CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+          CACHE_TLS_ENABLED: 'true',
+        },
+      });
+    }
+
     // -------------------------
     // API Gateway
     // -------------------------
@@ -388,5 +412,17 @@ export class MsightCloudStack extends cdk.Stack {
       value: `node tools/init-db.js --cluster-arn ${cluster.clusterArn} --secret-arn ${cluster.secret!.secretArn} --db-name msight --region ${cdk.Stack.of(this).region}`,
       description: 'Run this command to initialize the database if this is the first deployment.',
     });
+
+    if (cacheDebugLambda) {
+      new cdk.CfnOutput(this, 'CacheDebugLambdaName', {
+        value: cacheDebugLambda.functionName,
+        description: 'Present only when debugMode is enabled.',
+      });
+
+      new cdk.CfnOutput(this, 'CacheDebugInvokeExample', {
+        value: `aws lambda invoke --function-name ${cacheDebugLambda.functionName} --payload '{"action":"ping"}' --cli-binary-format raw-in-base64-out /tmp/msight-cache-debug.json`,
+        description: 'Invoke cache debug Lambda directly (debugMode only).',
+      });
+    }
   }
 }

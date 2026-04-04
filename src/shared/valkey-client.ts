@@ -1,12 +1,12 @@
 import * as net from 'node:net';
 import * as tls from 'node:tls';
 
-export type ValkeyResponse = string | number | null;
+export type ValkeyResponse = string | number | null | ValkeyResponse[];
 
 type ValkeySocket = tls.TLSSocket | net.Socket;
 
 type ValkeyInFlightCommand = {
-  resolve: (response: string) => void;
+  resolve: (response: ValkeyResponse) => void;
   reject: (error: Error) => void;
   timeoutHandle: NodeJS.Timeout;
 };
@@ -26,7 +26,7 @@ function resetValkeyConnection(): void {
 
 function settleValkeyInFlightCommand(
   connection: ValkeyConnection,
-  outcome: { response?: string; error?: Error }
+  outcome: { response?: ValkeyResponse; error?: Error }
 ): void {
   const inFlightCommand = connection.inFlightCommand;
   if (!inFlightCommand) {
@@ -44,6 +44,102 @@ function settleValkeyInFlightCommand(
   inFlightCommand.resolve(outcome.response ?? '');
 }
 
+function parseValkeyResponse(
+  buffer: string,
+  startIndex = 0
+): { value: ValkeyResponse; nextIndex: number } | null {
+  if (startIndex >= buffer.length) {
+    return null;
+  }
+
+  const prefix = buffer[startIndex];
+
+  if (prefix === '+' || prefix === ':') {
+    const lineTerminatorIndex = buffer.indexOf('\r\n', startIndex);
+    if (lineTerminatorIndex === -1) {
+      return null;
+    }
+
+    const rawValue = buffer.slice(startIndex + 1, lineTerminatorIndex);
+    const value = prefix === ':' ? Number(rawValue) : rawValue;
+    return {
+      value,
+      nextIndex: lineTerminatorIndex + 2,
+    };
+  }
+
+  if (prefix === '$') {
+    const lineTerminatorIndex = buffer.indexOf('\r\n', startIndex);
+    if (lineTerminatorIndex === -1) {
+      return null;
+    }
+
+    const lengthValue = Number(buffer.slice(startIndex + 1, lineTerminatorIndex));
+    if (!Number.isInteger(lengthValue)) {
+      throw new Error('Invalid bulk string length returned by Valkey');
+    }
+
+    if (lengthValue === -1) {
+      return {
+        value: null,
+        nextIndex: lineTerminatorIndex + 2,
+      };
+    }
+
+    const valueStartIndex = lineTerminatorIndex + 2;
+    const valueEndIndex = valueStartIndex + lengthValue;
+    const nextIndex = valueEndIndex + 2;
+
+    if (buffer.length < nextIndex) {
+      return null;
+    }
+
+    return {
+      value: buffer.slice(valueStartIndex, valueEndIndex),
+      nextIndex,
+    };
+  }
+
+  if (prefix === '*') {
+    const lineTerminatorIndex = buffer.indexOf('\r\n', startIndex);
+    if (lineTerminatorIndex === -1) {
+      return null;
+    }
+
+    const lengthValue = Number(buffer.slice(startIndex + 1, lineTerminatorIndex));
+    if (!Number.isInteger(lengthValue)) {
+      throw new Error('Invalid array length returned by Valkey');
+    }
+
+    if (lengthValue === -1) {
+      return {
+        value: null,
+        nextIndex: lineTerminatorIndex + 2,
+      };
+    }
+
+    const values: ValkeyResponse[] = [];
+    let cursor = lineTerminatorIndex + 2;
+
+    for (let index = 0; index < lengthValue; index += 1) {
+      const nested = parseValkeyResponse(buffer, cursor);
+      if (!nested) {
+        return null;
+      }
+
+      values.push(nested.value);
+      cursor = nested.nextIndex;
+    }
+
+    return {
+      value: values,
+      nextIndex: cursor,
+    };
+  }
+
+  throw new Error(`Unsupported Valkey response prefix: ${prefix}`);
+}
+
 function processValkeyResponseBuffer(connection: ValkeyConnection): void {
   if (!connection.inFlightCommand) {
     return;
@@ -53,81 +149,31 @@ function processValkeyResponseBuffer(connection: ValkeyConnection): void {
     return;
   }
 
-  const prefix = connection.responseBuffer[0];
+  try {
+    if (connection.responseBuffer[0] === '-') {
+      const lineTerminatorIndex = connection.responseBuffer.indexOf('\r\n');
+      if (lineTerminatorIndex === -1) {
+        return;
+      }
 
-  if (prefix === '+') {
-    const lineTerminatorIndex = connection.responseBuffer.indexOf('\r\n');
-    if (lineTerminatorIndex === -1) {
-      return;
-    }
-
-    const line = connection.responseBuffer.slice(1, lineTerminatorIndex);
-    connection.responseBuffer = connection.responseBuffer.slice(lineTerminatorIndex + 2);
-    settleValkeyInFlightCommand(connection, { response: line });
-    return;
-  }
-
-  if (prefix === '-') {
-    const lineTerminatorIndex = connection.responseBuffer.indexOf('\r\n');
-    if (lineTerminatorIndex === -1) {
-      return;
-    }
-
-    const line = connection.responseBuffer.slice(1, lineTerminatorIndex);
-    connection.responseBuffer = connection.responseBuffer.slice(lineTerminatorIndex + 2);
-    settleValkeyInFlightCommand(connection, { error: new Error(line) });
-    return;
-  }
-
-  if (prefix === ':') {
-    const lineTerminatorIndex = connection.responseBuffer.indexOf('\r\n');
-    if (lineTerminatorIndex === -1) {
-      return;
-    }
-
-    const line = connection.responseBuffer.slice(1, lineTerminatorIndex);
-    connection.responseBuffer = connection.responseBuffer.slice(lineTerminatorIndex + 2);
-    settleValkeyInFlightCommand(connection, { response: line });
-    return;
-  }
-
-  if (prefix === '$') {
-    const lineTerminatorIndex = connection.responseBuffer.indexOf('\r\n');
-    if (lineTerminatorIndex === -1) {
-      return;
-    }
-
-    const lengthValue = Number(connection.responseBuffer.slice(1, lineTerminatorIndex));
-    if (!Number.isInteger(lengthValue)) {
-      settleValkeyInFlightCommand(connection, {
-        error: new Error('Invalid bulk string length returned by Valkey'),
-      });
-      return;
-    }
-
-    if (lengthValue === -1) {
+      const line = connection.responseBuffer.slice(1, lineTerminatorIndex);
       connection.responseBuffer = connection.responseBuffer.slice(lineTerminatorIndex + 2);
-      settleValkeyInFlightCommand(connection, { response: '' });
+      settleValkeyInFlightCommand(connection, { error: new Error(line) });
       return;
     }
 
-    const totalLength = lineTerminatorIndex + 2 + lengthValue + 2;
-    if (connection.responseBuffer.length < totalLength) {
+    const parsed = parseValkeyResponse(connection.responseBuffer);
+    if (!parsed) {
       return;
     }
 
-    const bulkValue = connection.responseBuffer.slice(
-      lineTerminatorIndex + 2,
-      lineTerminatorIndex + 2 + lengthValue
-    );
-    connection.responseBuffer = connection.responseBuffer.slice(totalLength);
-    settleValkeyInFlightCommand(connection, { response: bulkValue });
-    return;
+    connection.responseBuffer = connection.responseBuffer.slice(parsed.nextIndex);
+    settleValkeyInFlightCommand(connection, { response: parsed.value });
+  } catch (error) {
+    settleValkeyInFlightCommand(connection, {
+      error: error instanceof Error ? error : new Error(String(error)),
+    });
   }
-
-  settleValkeyInFlightCommand(connection, {
-    error: new Error(`Unsupported Valkey response prefix: ${prefix}`),
-  });
 }
 
 function encodeValkeyCommand(args: Array<string | number>): string {

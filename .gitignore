@@ -2,6 +2,7 @@
 !jest.config.js
 !init-db.js
 !test-client.js
+!cache_debug.js
 *.d.ts
 node_modules
 

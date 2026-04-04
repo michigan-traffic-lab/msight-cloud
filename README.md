@@ -56,6 +56,27 @@ What this deployment does:
 * Keeps RDS Proxy subnet coverage across AZs to satisfy service requirements.
 * Adds a Secrets Manager VPC interface endpoint.
 
+### Debug-only Valkey Inspector Lambda
+
+To deploy a temporary Lambda that can inspect Valkey from inside the VPC, enable `debugMode`:
+
+```bash
+npx cdk deploy MsightCloudStack --require-approval never -c preferredAz=us-east-2a -c debugMode=true
+```
+
+When `debugMode=true`, deploy outputs include `CacheDebugLambdaName` and `CacheDebugInvokeExample`.
+
+Example invoke commands:
+
+```bash
+aws lambda invoke --function-name <CacheDebugLambdaName> --payload '{"action":"ping"}' --cli-binary-format raw-in-base64-out /tmp/cache-debug.json && cat /tmp/cache-debug.json
+aws lambda invoke --function-name <CacheDebugLambdaName> --payload '{"action":"get","key":"location:device-123"}' --cli-binary-format raw-in-base64-out /tmp/cache-debug.json && cat /tmp/cache-debug.json
+```
+
+Supported actions: `ping`, `get`, `set`, `ttl`, `type`, `exists`, `del`.
+
+In production mode (default), do not pass `debugMode=true`; the debug Lambda and related outputs are not created.
+
 ### 5. Verify the deployed version
 
 Use the `HttpApiUrl` from deploy output and call:
