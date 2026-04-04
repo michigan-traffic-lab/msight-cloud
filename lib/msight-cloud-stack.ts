@@ -253,15 +253,13 @@ export class MsightCloudStack extends cdk.Stack {
         API_VERSION: 'v1',
         SERVICE_NAME: 'location-api',
         BUILD_ID: buildId,
-        DB_HOST: proxy.endpoint,
-        DB_PORT: '5432',
-        DB_NAME: 'msight',
-        DB_USER: 'msight_admin',
-        DB_SECRET_ARN: cluster.secret!.secretArn,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+        LOCATION_TTL_SECONDS: '1800',
+        LOCATION_ZONE_ID: 'zone01',
       },
     });
-
-    cluster.secret!.grantRead(locationLambda);
 
     // -------------------------
     // System Lambda

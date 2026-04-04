@@ -1,0 +1,81 @@
+{
+  "version": "52.0.0",
+  "files": {
+    "7fa1e366ee8a9ded01fc355f704cff92bfd179574e6f9cfee800a3541df1b200": {
+      "displayName": "MsightCloudStack/Custom::VpcRestrictDefaultSGCustomResourceProvider Code",
+      "source": {
+        "path": "asset.7fa1e366ee8a9ded01fc355f704cff92bfd179574e6f9cfee800a3541df1b200",
+        "packaging": "zip"
+      },
+      "destinations": {
+        "162092913718-us-east-2-9794e486": {
+          "bucketName": "cdk-hnb659fds-assets-162092913718-us-east-2",
+          "objectKey": "7fa1e366ee8a9ded01fc355f704cff92bfd179574e6f9cfee800a3541df1b200.zip",
+          "region": "us-east-2",
+          "assumeRoleArn": "arn:${AWS::Partition}:iam::162092913718:role/cdk-hnb659fds-file-publishing-role-162092913718-us-east-2"
+        }
+      }
+    },
+    "9b73918479394ad5717126a0d204314b1dedaf7f7caa7a8f3dc6a1d218babd46": {
+      "displayName": "LocationLambda/Code",
+      "source": {
+        "path": "asset.9b73918479394ad5717126a0d204314b1dedaf7f7caa7a8f3dc6a1d218babd46",
+        "packaging": "zip"
+      },
+      "destinations": {
+        "162092913718-us-east-2-c16c234d": {
+          "bucketName": "cdk-hnb659fds-assets-162092913718-us-east-2",
+          "objectKey": "9b73918479394ad5717126a0d204314b1dedaf7f7caa7a8f3dc6a1d218babd46.zip",
+          "region": "us-east-2",
+          "assumeRoleArn": "arn:${AWS::Partition}:iam::162092913718:role/cdk-hnb659fds-file-publishing-role-162092913718-us-east-2"
+        }
+      }
+    },
+    "1cce53404fa95c8211c51bb1a1527f92dbf6231497345c24ae1725d41562aa27": {
+      "displayName": "SystemLambda/Code",
+      "source": {
+        "path": "asset.1cce53404fa95c8211c51bb1a1527f92dbf6231497345c24ae1725d41562aa27",
+        "packaging": "zip"
+      },
+      "destinations": {
+        "162092913718-us-east-2-ceae7de8": {
+          "bucketName": "cdk-hnb659fds-assets-162092913718-us-east-2",
+          "objectKey": "1cce53404fa95c8211c51bb1a1527f92dbf6231497345c24ae1725d41562aa27.zip",
+          "region": "us-east-2",
+          "assumeRoleArn": "arn:${AWS::Partition}:iam::162092913718:role/cdk-hnb659fds-file-publishing-role-162092913718-us-east-2"
+        }
+      }
+    },
+    "db9b9e2568fd1d88d7449951d52f9a7dea69ba91ac276ee34e6425ffb23d4d19": {
+      "displayName": "LatencyLambda/Code",
+      "source": {
+        "path": "asset.db9b9e2568fd1d88d7449951d52f9a7dea69ba91ac276ee34e6425ffb23d4d19",
+        "packaging": "zip"
+      },
+      "destinations": {
+        "162092913718-us-east-2-8cddd604": {
+          "bucketName": "cdk-hnb659fds-assets-162092913718-us-east-2",
+          "objectKey": "db9b9e2568fd1d88d7449951d52f9a7dea69ba91ac276ee34e6425ffb23d4d19.zip",
+          "region": "us-east-2",
+          "assumeRoleArn": "arn:${AWS::Partition}:iam::162092913718:role/cdk-hnb659fds-file-publishing-role-162092913718-us-east-2"
+        }
+      }
+    },
+    "82b6bfd771f855f48ca5b369f520a4b499cc4e5535f6046b4dbf0028d08ca84e": {
+      "displayName": "MsightCloudStack Template",
+      "source": {
+        "path": "MsightCloudStack.template.json",
+        "packaging": "file"
+      },
+      "destinations": {
+        "162092913718-us-east-2-a8ef6281": {
+          "bucketName": "cdk-hnb659fds-assets-162092913718-us-east-2",
+          "objectKey": "82b6bfd771f855f48ca5b369f520a4b499cc4e5535f6046b4dbf0028d08ca84e.json",
+          "region": "us-east-2",
+          "assumeRoleArn": "arn:${AWS::Partition}:iam::162092913718:role/cdk-hnb659fds-file-publishing-role-162092913718-us-east-2"
+        }
+      }
+    }
+  },
+  "dockerImages": {}
+}

@@ -53,7 +53,7 @@ registry.registerPath({
   path: '/v1/clients/location/update',
   summary: 'Update client location',
   description:
-    'Accepts a client location update and returns an acknowledgment. This initial version validates input and returns success without persistence.',
+    'Accepts a client location update, writes the client record into Valkey geo/hash/expiry indexes, and returns an acknowledgment.',
   request: {
     body: {
       required: true,

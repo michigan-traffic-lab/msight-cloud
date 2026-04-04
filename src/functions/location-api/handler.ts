@@ -3,21 +3,16 @@ import type {
   APIGatewayProxyStructuredResultV2,
 } from 'aws-lambda';
 import { randomUUID } from 'crypto';
-import { Pool } from 'pg';
-import {
-  SecretsManagerClient,
-  GetSecretValueCommand,
-} from '@aws-sdk/client-secrets-manager';
 import {
   AckResponseSchema,
   HealthResponseSchema,
   LocationUpdateRequestSchema,
   type LocationUpdateRequest,
 } from '../../shared/schemas/location';
+import { sendValkeyArrayCommand } from '../../shared/valkey-client.js';
 
-const secretsClient = new SecretsManagerClient({});
-
-let poolPromise: Promise<Pool> | null = null;
+const DEFAULT_ZONE_ID = 'zone01';
+const DEFAULT_LOCATION_TTL_SECONDS = 30 * 60;
 
 function jsonResponse(
   statusCode: number,
@@ -32,278 +27,136 @@ function jsonResponse(
   };
 }
 
-async function loadDbCredentials(): Promise<{
-  username: string;
-  password: string;
-}> {
-  const secretArn = process.env.DB_SECRET_ARN;
-  if (!secretArn) {
-    throw new Error('DB_SECRET_ARN is not set');
-  }
-
-  const result = await secretsClient.send(
-    new GetSecretValueCommand({ SecretId: secretArn })
-  );
-
-  if (!result.SecretString) {
-    throw new Error('Database secret does not contain SecretString');
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result.SecretString);
-  } catch {
-    throw new Error('Database secret is not valid JSON');
-  }
-
-  if (
-    !parsed ||
-    typeof parsed !== 'object' ||
-    !('username' in parsed) ||
-    !('password' in parsed) ||
-    typeof parsed.username !== 'string' ||
-    typeof parsed.password !== 'string'
-  ) {
-    throw new Error(
-      'Database secret must contain string fields: username, password'
-    );
-  }
-
-  return {
-    username: parsed.username,
-    password: parsed.password,
-  };
+function getZoneId(): string {
+  return process.env.LOCATION_ZONE_ID ?? DEFAULT_ZONE_ID;
 }
 
-async function getPool(): Promise<Pool> {
-  if (!poolPromise) {
-    poolPromise = (async () => {
-      try {
-        const host = process.env.DB_HOST;
-        const port = Number(process.env.DB_PORT ?? '5432');
-        const database = process.env.DB_NAME;
-
-        if (!host) throw new Error('DB_HOST is not set');
-        if (!database) throw new Error('DB_NAME is not set');
-
-        const { username, password } = await loadDbCredentials();
-
-        const pool = new Pool({
-          host,
-          port,
-          database,
-          user: username,
-          password,
-          ssl: { rejectUnauthorized: false },
-          max: 4,
-          idleTimeoutMillis: 30_000,
-          connectionTimeoutMillis: 5_000,
-        });
-
-        pool.on('error', (err) => {
-          console.error('Unexpected PostgreSQL pool error:', err);
-        });
-
-        return pool;
-      } catch (error) {
-        poolPromise = null;
-        throw error;
-      }
-    })();
-  }
-
-  return poolPromise;
+function getLocationTtlSeconds(): number {
+  return Number(process.env.LOCATION_TTL_SECONDS ?? String(DEFAULT_LOCATION_TTL_SECONDS));
 }
 
-function computeExpiresAt(eventTimestamp: Date): Date {
-  const ttlSeconds = Number(process.env.LOCATION_TTL_SECONDS ?? '120');
-  return new Date(eventTimestamp.getTime() + ttlSeconds * 1000);
+function buildGeoClientsKey(appId: string): string {
+  return `msight:${getZoneId()}:${appId}:geo:clients`;
+}
+
+function buildClientKey(appId: string, clientId: string): string {
+  return `msight:${getZoneId()}:${appId}:client:${clientId}`;
+}
+
+function buildExpirationKey(appId: string): string {
+  return `msight:${getZoneId()}:${appId}:expires:clients`;
+}
+
+function buildClientHashFields(
+  request: LocationUpdateRequest,
+  expiresAtIso: string,
+  expiresAtEpochMs: number
+): Array<string | number> {
+  const location = request.location;
+
+  return [
+    'app_id', request.app_id,
+    'client_id', request.client_id,
+    'zone_id', getZoneId(),
+    'timestamp', request.timestamp,
+    'expires_at', expiresAtIso,
+    'expires_at_epoch_ms', expiresAtEpochMs,
+    'lat', location.lat,
+    'lon', location.lon,
+    'payload', JSON.stringify(request),
+    'updated_at', new Date().toISOString(),
+    'alt', location.alt ?? '',
+    'horizontal_accuracy_m', location.horizontal_accuracy_m ?? '',
+    'vertical_accuracy_m', location.vertical_accuracy_m ?? '',
+    'confidence', location.confidence ?? '',
+    'speed_mps', location.speed_mps ?? '',
+    'speed_accuracy_mps', location.speed_accuracy_mps ?? '',
+    'heading_deg', location.heading_deg ?? '',
+    'heading_accuracy_deg', location.heading_accuracy_deg ?? '',
+    'fix_type', location.fix_type ?? '',
+    'satellites_visible', location.satellites_visible ?? '',
+    'hdop', location.hdop ?? '',
+    'vdop', location.vdop ?? '',
+    'pdop', location.pdop ?? '',
+    'source', location.source ?? '',
+  ];
 }
 
 async function upsertClientLocation(request: LocationUpdateRequest): Promise<void> {
-  const pool = await getPool();
-  const eventTimestamp = new Date(request.timestamp);
-  const expiresAt = computeExpiresAt(eventTimestamp);
+  const ttlSeconds = getLocationTtlSeconds();
+  const expiresAtEpochMs = Date.now() + ttlSeconds * 1000;
+  const expiresAtIso = new Date(expiresAtEpochMs).toISOString();
+  const geoClientsKey = buildGeoClientsKey(request.app_id);
+  const clientKey = buildClientKey(request.app_id, request.client_id);
+  const expirationKey = buildExpirationKey(request.app_id);
 
-  console.log('DB write start', {
-    host: process.env.DB_HOST,
-    dbName: process.env.DB_NAME,
-    secretArn: process.env.DB_SECRET_ARN,
+  console.log('Valkey write start', {
+    cacheHost: process.env.CACHE_HOST,
     appId: request.app_id,
     clientId: request.client_id,
-    timestamp: request.timestamp,
+    zoneId: getZoneId(),
+    geoClientsKey,
+    clientKey,
+    expirationKey,
   });
 
-  const result = await pool.query(
-    `
-    INSERT INTO client_locations (
-      app_id,
-      client_id,
-      event_timestamp,
-      expires_at,
-      lat,
-      lon,
-      alt,
-      horizontal_accuracy_m,
-      vertical_accuracy_m,
-      confidence,
-      speed_mps,
-      speed_accuracy_mps,
-      heading_deg,
-      heading_accuracy_deg,
-      fix_type,
-      satellites_visible,
-      hdop,
-      vdop,
-      pdop,
-      source,
-      position,
-      payload,
-      updated_at
-    )
-    VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-      $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-      ST_SetSRID(ST_MakePoint($21, $22), 4326)::geography,
-      $23::jsonb,
-      NOW()
-    )
-    ON CONFLICT (app_id, client_id)
-    DO UPDATE SET
-      event_timestamp = EXCLUDED.event_timestamp,
-      expires_at = EXCLUDED.expires_at,
-      lat = EXCLUDED.lat,
-      lon = EXCLUDED.lon,
-      alt = EXCLUDED.alt,
-      horizontal_accuracy_m = EXCLUDED.horizontal_accuracy_m,
-      vertical_accuracy_m = EXCLUDED.vertical_accuracy_m,
-      confidence = EXCLUDED.confidence,
-      speed_mps = EXCLUDED.speed_mps,
-      speed_accuracy_mps = EXCLUDED.speed_accuracy_mps,
-      heading_deg = EXCLUDED.heading_deg,
-      heading_accuracy_deg = EXCLUDED.heading_accuracy_deg,
-      fix_type = EXCLUDED.fix_type,
-      satellites_visible = EXCLUDED.satellites_visible,
-      hdop = EXCLUDED.hdop,
-      vdop = EXCLUDED.vdop,
-      pdop = EXCLUDED.pdop,
-      source = EXCLUDED.source,
-      position = EXCLUDED.position,
-      payload = EXCLUDED.payload,
-      updated_at = NOW()
-    `,
-    [
-      request.app_id,
-      request.client_id,
-      request.timestamp,
-      expiresAt.toISOString(),
-      request.location.lat,
-      request.location.lon,
-      request.location.alt ?? null,
-      request.location.horizontal_accuracy_m ?? null,
-      request.location.vertical_accuracy_m ?? null,
-      request.location.confidence ?? null,
-      request.location.speed_mps ?? null,
-      request.location.speed_accuracy_mps ?? null,
-      request.location.heading_deg ?? null,
-      request.location.heading_accuracy_deg ?? null,
-      request.location.fix_type ?? null,
-      request.location.satellites_visible ?? null,
-      request.location.hdop ?? null,
-      request.location.vdop ?? null,
-      request.location.pdop ?? null,
-      request.location.source ?? null,
-      request.location.lon,
-      request.location.lat,
-      JSON.stringify(request),
-    ]
-  );
+  await sendValkeyArrayCommand([
+    'GEOADD',
+    geoClientsKey,
+    request.location.lon,
+    request.location.lat,
+    request.client_id,
+  ]);
 
-  console.log('DB write finished', {
-    rowCount: result.rowCount,
-    command: result.command,
+  await sendValkeyArrayCommand([
+    'HSET',
+    clientKey,
+    ...buildClientHashFields(request, expiresAtIso, expiresAtEpochMs),
+  ]);
+
+  await sendValkeyArrayCommand([
+    'ZADD',
+    expirationKey,
+    expiresAtEpochMs,
+    request.client_id,
+  ]);
+
+  console.log('Valkey write finished', {
+    appId: request.app_id,
+    clientId: request.client_id,
+    expiresAt: expiresAtIso,
   });
 }
 
-function mapDatabaseError(error: unknown): {
+function mapCacheError(error: unknown): {
   statusCode: number;
   body: Record<string, unknown>;
 } {
-  const err = error as {
-    code?: string;
-    message?: string;
-    name?: string;
-  };
+  const message = error instanceof Error ? error.message : 'Unknown cache failure';
 
-  console.error('Database error:', error);
+  console.error('Valkey error:', error);
 
-  if (err.code === 'ETIMEDOUT') {
+  if (message.includes('Timed out')) {
     return {
       statusCode: 503,
       body: {
-        error: 'database_timeout',
-        message: 'Database connection timed out.',
+        error: 'cache_timeout',
+        message: 'Valkey connection timed out.',
       },
     };
   }
 
-  if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND') {
+  if (
+    message.includes('ECONNREFUSED') ||
+    message.includes('ENOTFOUND') ||
+    message.includes('closed') ||
+    message.includes('CACHE_HOST is not set')
+  ) {
     return {
       statusCode: 503,
       body: {
-        error: 'database_unavailable',
-        message: 'Database is currently unavailable.',
-      },
-    };
-  }
-
-  if (err.code === '28P01') {
-    return {
-      statusCode: 500,
-      body: {
-        error: 'database_auth_failed',
-        message: 'Database authentication failed.',
-      },
-    };
-  }
-
-  if (err.code === '3D000') {
-    return {
-      statusCode: 500,
-      body: {
-        error: 'database_not_found',
-        message: 'Configured database does not exist.',
-      },
-    };
-  }
-
-  if (err.code === '23514') {
-    return {
-      statusCode: 400,
-      body: {
-        error: 'database_constraint_violation',
-        message:
-          'Request data violates a database check constraint.',
-      },
-    };
-  }
-
-  if (err.code === '22P02') {
-    return {
-      statusCode: 400,
-      body: {
-        error: 'database_invalid_text_representation',
-        message: 'Request data has an invalid database value format.',
-      },
-    };
-  }
-
-  if (err.code === '23502') {
-    return {
-      statusCode: 500,
-      body: {
-        error: 'database_not_null_violation',
-        message: 'Database rejected a required field as null.',
+        error: 'cache_unavailable',
+        message: 'Valkey is currently unavailable.',
       },
     };
   }
@@ -311,8 +164,8 @@ function mapDatabaseError(error: unknown): {
   return {
     statusCode: 500,
     body: {
-      error: 'database_write_failed',
-      message: 'Failed to persist location update.',
+      error: 'cache_write_failed',
+      message: 'Failed to persist location update in Valkey.',
     },
   };
 }
@@ -366,7 +219,7 @@ export async function handler(
     try {
       await upsertClientLocation(parsed.data);
     } catch (error) {
-      const mapped = mapDatabaseError(error);
+      const mapped = mapCacheError(error);
       return jsonResponse(mapped.statusCode, {
         ...mapped.body,
         server_timestamp: new Date().toISOString(),
