@@ -5,7 +5,9 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as elasticache from 'aws-cdk-lib/aws-elasticache';
 import * as rds from 'aws-cdk-lib/aws-rds';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import { WebSocketLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
@@ -108,6 +110,16 @@ export class MsightCloudStack extends cdk.Stack {
       ],
     });
 
+    const publicSubnets = vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC }).subnets;
+    const natEip = new ec2.CfnEIP(this, 'MsightNatEip', {
+      domain: 'vpc',
+    });
+
+    const natGateway = new ec2.CfnNatGateway(this, 'MsightNatGateway', {
+      allocationId: natEip.attrAllocationId,
+      subnetId: publicSubnets[0].subnetId,
+    });
+
     // -------------------------
     // Security Groups (renamed)
     // -------------------------
@@ -139,6 +151,13 @@ export class MsightCloudStack extends cdk.Stack {
       securityGroupName: 'msight-cache-sg',
     });
 
+    const vpcEndpointSg = new ec2.SecurityGroup(this, 'MsightVpcEndpointSg', {
+      vpc,
+      allowAllOutbound: true,
+      description: 'MSight Interface VPC Endpoints Security Group',
+      securityGroupName: 'msight-vpce-sg',
+    });
+
     // Lambda -> Proxy
     proxySg.addIngressRule(lambdaSg, ec2.Port.tcp(5432), 'Lambda to Proxy');
 
@@ -148,11 +167,31 @@ export class MsightCloudStack extends cdk.Stack {
     // Proxy -> DB
     dbSg.addIngressRule(proxySg, ec2.Port.tcp(5432), 'Proxy to Aurora');
 
+    // Lambda -> Interface VPC Endpoints
+    vpcEndpointSg.addIngressRule(
+      lambdaSg,
+      ec2.Port.tcp(443),
+      'Lambda HTTPS to interface endpoints'
+    );
+
     const preferredAppSubnetSelection: ec2.SubnetSelection = hasPreferredAz
       ? { subnetGroupName: 'app', availabilityZones: [preferredAz] }
       : { subnetGroupName: 'app' };
     const appSubnets = vpc.selectSubnets({ subnetGroupName: 'app' });
     const preferredAppSubnets = vpc.selectSubnets(preferredAppSubnetSelection);
+
+    for (const [index, subnet] of appSubnets.subnets.entries()) {
+      if (!(subnet instanceof ec2.Subnet)) {
+        continue;
+      }
+
+      subnet.addRoute(`DefaultInternetViaNat${index + 1}`, {
+        routerId: natGateway.ref,
+        routerType: ec2.RouterType.NAT_GATEWAY,
+        enablesInternetConnectivity: true,
+      });
+    }
+
     const cacheSubnetIds = hasPreferredAz
       ? preferredAppSubnets.subnetIds
       : [appSubnets.subnetIds[0]];
@@ -228,7 +267,8 @@ export class MsightCloudStack extends cdk.Stack {
       vpc,
       service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
       subnets: appSubnetSelection,
-      securityGroups: [lambdaSg],
+      open: false,
+      securityGroups: [vpcEndpointSg],
     });
 
     // -------------------------
@@ -264,6 +304,53 @@ export class MsightCloudStack extends cdk.Stack {
         CACHE_TLS_ENABLED: 'true',
         LOCATION_TTL_SECONDS: '1800',
         LOCATION_ZONE_ID: 'zone01',
+      },
+    });
+
+    const wsConnectLambda = new NodejsFunction(this, 'WsConnectLambda', {
+      ...commonLambdaProps,
+      entry: path.join(__dirname, '../src/functions/ws-connect/handler.ts'),
+      handler: 'handler',
+      environment: {
+        API_VERSION: 'v1',
+        SERVICE_NAME: 'ws-connect',
+        BUILD_ID: buildId,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+        LOCATION_ZONE_ID: 'zone01',
+      },
+    });
+
+    const wsDisconnectLambda = new NodejsFunction(this, 'WsDisconnectLambda', {
+      ...commonLambdaProps,
+      entry: path.join(__dirname, '../src/functions/ws-disconnect/handler.ts'),
+      handler: 'handler',
+      environment: {
+        API_VERSION: 'v1',
+        SERVICE_NAME: 'ws-disconnect',
+        BUILD_ID: buildId,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+        LOCATION_ZONE_ID: 'zone01',
+      },
+    });
+
+    const radiusBroadcastLambda = new NodejsFunction(this, 'RadiusBroadcastLambda', {
+      ...commonLambdaProps,
+      entry: path.join(__dirname, '../src/functions/radius-broadcast-api/handler.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        API_VERSION: 'v1',
+        SERVICE_NAME: 'radius-broadcast-api',
+        BUILD_ID: buildId,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+        LOCATION_ZONE_ID: 'zone01',
+        WS_SEND_TIMEOUT_MS: '3000',
       },
     });
 
@@ -340,6 +427,21 @@ export class MsightCloudStack extends cdk.Stack {
       latencyLambda
     );
 
+    const radiusBroadcastIntegration = new HttpLambdaIntegration(
+      'RadiusBroadcastIntegration',
+      radiusBroadcastLambda
+    );
+
+    const wsConnectIntegration = new WebSocketLambdaIntegration(
+      'WsConnectIntegration',
+      wsConnectLambda
+    );
+
+    const wsDisconnectIntegration = new WebSocketLambdaIntegration(
+      'WsDisconnectIntegration',
+      wsDisconnectLambda
+    );
+
     const httpApi = new apigwv2.HttpApi(this, 'MsightHttpApi', {
       apiName: 'msight-http-api',
       corsPreflight: {
@@ -385,16 +487,81 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     httpApi.addRoutes({
+      path: '/system/websocket-url',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: systemIntegration,
+    });
+
+    httpApi.addRoutes({
       path: '/v1/client/latency',
       methods: [apigwv2.HttpMethod.GET],
       integration: latencyIntegration,
     });
+
+    httpApi.addRoutes({
+      path: '/v1/clients/notify/radius',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: radiusBroadcastIntegration,
+    });
+
+    const wsApi = new apigwv2.WebSocketApi(this, 'MsightWsApi', {
+      apiName: 'msight-ws-api',
+      connectRouteOptions: {
+        integration: wsConnectIntegration,
+      },
+      disconnectRouteOptions: {
+        integration: wsDisconnectIntegration,
+      },
+    });
+
+    const wsStage = new apigwv2.WebSocketStage(this, 'MsightWsStage', {
+      webSocketApi: wsApi,
+      stageName: 'v1',
+      autoDeploy: true,
+    });
+
+    const wsApiUrl = cdk.Fn.join('', [
+      'wss://',
+      wsApi.apiId,
+      '.execute-api.',
+      cdk.Stack.of(this).region,
+      '.',
+      cdk.Aws.URL_SUFFIX,
+      '/',
+      wsStage.stageName,
+    ]);
+
+    const wsManageConnectionsArn = cdk.Stack.of(this).formatArn({
+      service: 'execute-api',
+      resource: wsApi.apiId,
+      resourceName: '*',
+    });
+
+    wsConnectLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['execute-api:ManageConnections'],
+        resources: [wsManageConnectionsArn],
+      })
+    );
+
+    radiusBroadcastLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['execute-api:ManageConnections'],
+        resources: [wsManageConnectionsArn],
+      })
+    );
+
+    systemLambda.addEnvironment('WS_API_URL', wsApiUrl);
 
     // -------------------------
     // Outputs
     // -------------------------
     new cdk.CfnOutput(this, 'HttpApiUrl', {
       value: httpApi.apiEndpoint,
+    });
+
+    new cdk.CfnOutput(this, 'WebSocketApiUrl', {
+      value: wsApiUrl,
     });
 
     new cdk.CfnOutput(this, 'DbProxyEndpoint', {

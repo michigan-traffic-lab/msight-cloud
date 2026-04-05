@@ -1,0 +1,1006 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MSight WS Radius Test</title>
+    <style>
+      :root {
+        --bg: #f6f8fb;
+        --card: #ffffff;
+        --text: #152033;
+        --muted: #5f6b7a;
+        --border: #d9e1ea;
+        --accent: #0b57d0;
+        --accent-hover: #0847ab;
+        --success: #0f9d58;
+        --error: #d93025;
+        --shadow: 0 10px 30px rgba(16, 24, 40, 0.08);
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .page {
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        box-shadow: var(--shadow);
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 1.35rem;
+      }
+
+      h2 {
+        margin: 0 0 10px;
+        font-size: 1.05rem;
+      }
+
+      .subtitle {
+        margin: 0 0 14px;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .nav-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+
+      .nav-link {
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 700;
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .field.full { grid-column: 1 / -1; }
+
+      label {
+        font-size: 0.92rem;
+        font-weight: 600;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        min-height: 44px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 12px;
+        font-size: 0.95rem;
+        outline: none;
+        background: #fff;
+      }
+
+      textarea {
+        min-height: 130px;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+      }
+
+      input:focus,
+      textarea:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(11, 87, 208, 0.12);
+      }
+
+      input[readonly] {
+        background: #f2f5f9;
+        color: #495465;
+      }
+
+      .button-row {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+        margin-top: 8px;
+      }
+
+      button {
+        border: none;
+        border-radius: 12px;
+        min-height: 44px;
+        padding: 10px 14px;
+        font-size: 0.95rem;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .btn-primary { background: var(--accent); color: white; }
+      .btn-primary:hover { background: var(--accent-hover); }
+
+      .btn-secondary {
+        background: #eef3fb;
+        color: var(--accent);
+        border: 1px solid #d4e3fb;
+      }
+
+      .btn-danger {
+        background: #fdecea;
+        color: var(--error);
+        border: 1px solid #f8c9c5;
+      }
+
+      .status {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        font-size: 0.92rem;
+        display: none;
+      }
+
+      .status.show { display: block; }
+      .status.info { background: #eef3fb; color: #214b8f; }
+      .status.success { background: #e9f7ef; color: var(--success); }
+      .status.error { background: #fdecea; color: var(--error); }
+
+      .log-wrap {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px;
+        background: #fff;
+        max-height: 280px;
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+        font-size: 0.82rem;
+        line-height: 1.4;
+      }
+
+      .small {
+        color: var(--muted);
+        font-size: 0.84rem;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+        margin: 10px 0;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: #fff;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 980px;
+      }
+
+      th, td {
+        text-align: left;
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.9rem;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .pill {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 700;
+      }
+
+      .pill.success { background: #e9f7ef; color: var(--success); }
+      .pill.error { background: #fdecea; color: var(--error); }
+      .pill.info { background: #eef3fb; color: #214b8f; }
+
+      .metric {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 8px 10px;
+        background: #fbfdff;
+      }
+
+      @media (min-width: 720px) {
+        .form-grid { grid-template-columns: 1fr 1fr; }
+        .button-row { grid-template-columns: 1fr 1fr 1fr; }
+        .metrics { grid-template-columns: 1fr 1fr 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="card">
+        <div class="nav-row">
+          <h1>WS Radius Broadcast Test</h1>
+          <a class="nav-link" href="./index.html">Back to Main Client</a>
+        </div>
+        <p class="subtitle">
+          Top section sends periodic location updates every 0.5s and opens websocket once started. Bottom section broadcasts a custom message to nearby clients and logs send→receive latency.
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>1) Periodic Location + WebSocket</h2>
+        <div class="form-grid">
+          <div class="field full">
+            <label for="appId">App ID</label>
+            <input id="appId" value="msight-internal-testing-app" />
+          </div>
+          <div class="field">
+            <label for="clientId">Client ID</label>
+            <input id="clientId" value="client1" />
+          </div>
+          <div class="field">
+            <label for="locationEndpoint">Location Update Endpoint</label>
+            <input id="locationEndpoint" value="https://7hmptbe8s3.execute-api.us-east-2.amazonaws.com/v1/clients/location/update" />
+          </div>
+          <div class="field full">
+            <label for="systemWsEndpoint">System WS URL Endpoint</label>
+            <input id="systemWsEndpoint" value="https://7hmptbe8s3.execute-api.us-east-2.amazonaws.com/system/websocket-url" />
+          </div>
+          <div class="field">
+            <label for="lat">Latitude</label>
+            <input id="lat" type="number" step="any" placeholder="42.2808" />
+          </div>
+          <div class="field">
+            <label for="lon">Longitude</label>
+            <input id="lon" type="number" step="any" placeholder="-83.743" />
+          </div>
+          <div class="field full">
+            <label for="wsUrlDisplay">Current WS Base URL</label>
+            <input id="wsUrlDisplay" readonly value="(not loaded yet)" />
+          </div>
+        </div>
+
+        <div class="button-row">
+          <button id="useDeviceBtn" class="btn-secondary" type="button">Use Device Location</button>
+          <button id="startBtn" class="btn-primary" type="button">Start Periodic Update + WS</button>
+          <button id="stopBtn" class="btn-danger" type="button">Stop</button>
+        </div>
+
+        <div id="runnerStatus" class="status"></div>
+        <p class="small" id="runnerMeta">Updater stopped. Interval: 500ms.</p>
+      </div>
+
+      <div class="card">
+        <h2>2) Radius Broadcast + RTT Log</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="broadcastEndpoint">Broadcast Endpoint</label>
+            <input id="broadcastEndpoint" value="https://7hmptbe8s3.execute-api.us-east-2.amazonaws.com/v1/clients/notify/radius" />
+          </div>
+          <div class="field">
+            <label for="radiusM">Radius (meters)</label>
+            <input id="radiusM" type="number" min="1" value="10000" />
+          </div>
+          <div class="field">
+            <label for="broadcastLat">Broadcast Center Lat</label>
+            <input id="broadcastLat" type="number" step="any" placeholder="42.2808" />
+          </div>
+          <div class="field">
+            <label for="broadcastLon">Broadcast Center Lon</label>
+            <input id="broadcastLon" type="number" step="any" placeholder="-83.743" />
+          </div>
+          <div class="field full">
+            <label for="messageJson">Message JSON (custom payload)</label>
+            <textarea id="messageJson">{
+  "type": "debug-broadcast",
+  "text": "hello nearby clients"
+}</textarea>
+          </div>
+        </div>
+
+        <div class="button-row">
+          <button id="sendBroadcastBtn" class="btn-primary" type="button">Send Radius Broadcast</button>
+          <button id="clearLogBtn" class="btn-secondary" type="button">Clear Log</button>
+        </div>
+
+        <div id="broadcastStatus" class="status"></div>
+
+        <div class="metrics">
+          <div class="metric"><strong>Last RTT (ms):</strong> <span id="lastRtt">-</span></div>
+          <div class="metric"><strong>Avg RTT (ms):</strong> <span id="avgRtt">-</span></div>
+          <div class="metric"><strong>Matched RTT Samples:</strong> <span id="rttCount">0</span></div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Message ID</th>
+                <th>Count</th>
+                <th>Client Sent</th>
+                <th>Broadcast Ack</th>
+                <th>WS Received</th>
+                <th>RTT (ms)</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody id="broadcastTableBody">
+              <tr>
+                <td colspan="8" class="small">No broadcast requests yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="log-wrap" id="eventLog">[log initialized]</div>
+      </div>
+    </div>
+
+    <script>
+      const UPDATE_INTERVAL_MS = 500;
+
+      const appIdInput = document.getElementById('appId');
+      const clientIdInput = document.getElementById('clientId');
+      const locationEndpointInput = document.getElementById('locationEndpoint');
+      const systemWsEndpointInput = document.getElementById('systemWsEndpoint');
+      const latInput = document.getElementById('lat');
+      const lonInput = document.getElementById('lon');
+      const wsUrlDisplay = document.getElementById('wsUrlDisplay');
+      const useDeviceBtn = document.getElementById('useDeviceBtn');
+      const startBtn = document.getElementById('startBtn');
+      const stopBtn = document.getElementById('stopBtn');
+      const runnerStatus = document.getElementById('runnerStatus');
+      const runnerMeta = document.getElementById('runnerMeta');
+
+      const broadcastEndpointInput = document.getElementById('broadcastEndpoint');
+      const radiusMInput = document.getElementById('radiusM');
+      const broadcastLatInput = document.getElementById('broadcastLat');
+      const broadcastLonInput = document.getElementById('broadcastLon');
+      const messageJsonInput = document.getElementById('messageJson');
+      const sendBroadcastBtn = document.getElementById('sendBroadcastBtn');
+      const clearLogBtn = document.getElementById('clearLogBtn');
+      const broadcastStatus = document.getElementById('broadcastStatus');
+      const eventLog = document.getElementById('eventLog');
+      const broadcastTableBody = document.getElementById('broadcastTableBody');
+
+      const lastRttEl = document.getElementById('lastRtt');
+      const avgRttEl = document.getElementById('avgRtt');
+      const rttCountEl = document.getElementById('rttCount');
+
+      let updateTimer = null;
+      let websocket = null;
+      let websocketUrl = '';
+      const pendingBroadcastByMessageId = new Map();
+      const pendingBroadcastByMessageCount = new Map();
+      const matchedRttValues = [];
+      const broadcastRows = [];
+      let broadcastCount = 0;
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#039;');
+      }
+
+      function formatMetric(value) {
+        return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '-';
+      }
+
+      function renderBroadcastTable() {
+        if (broadcastRows.length === 0) {
+          broadcastTableBody.innerHTML = '<tr><td colspan="8" class="small">No broadcast requests yet.</td></tr>';
+          return;
+        }
+
+        broadcastTableBody.innerHTML = broadcastRows
+          .map((row) => {
+            const statusClass = row.status === 'MATCHED' ? 'success' : row.status === 'FAILED' ? 'error' : 'info';
+            return `
+              <tr>
+                <td><span class="pill ${statusClass}">${escapeHtml(row.status)}</span></td>
+                <td>${escapeHtml(row.messageId)}</td>
+                <td>${escapeHtml(row.messageCount)}</td>
+                <td>${escapeHtml(row.clientSentAt || '-')}</td>
+                <td>${escapeHtml(row.broadcastAckAt || '-')}</td>
+                <td>${escapeHtml(row.wsReceivedAt || '-')}</td>
+                <td>${formatMetric(row.rttMs)}</td>
+                <td>${escapeHtml(row.details || '-')}</td>
+              </tr>
+            `;
+          })
+          .join('');
+      }
+
+      function addBroadcastRow(row) {
+        broadcastRows.unshift(row);
+        if (broadcastRows.length > 100) {
+          broadcastRows.pop();
+        }
+        renderBroadcastTable();
+      }
+
+      function updateBroadcastRow(messageId, patch) {
+        const row = broadcastRows.find((item) => item.messageId === messageId);
+        if (!row) {
+          return;
+        }
+
+        Object.assign(row, patch);
+        renderBroadcastTable();
+      }
+
+      function findBroadcastRow(messageId, messageCount) {
+        if (messageId) {
+          const byId = broadcastRows.find((item) => item.messageId === messageId);
+          if (byId) {
+            return byId;
+          }
+        }
+
+        if (messageCount !== null && messageCount !== undefined) {
+          const byCount = broadcastRows.find((item) => Number(item.messageCount) === Number(messageCount));
+          if (byCount) {
+            return byCount;
+          }
+        }
+
+        return null;
+      }
+
+      function appendLog(message) {
+        const line = `[${new Date().toISOString()}] ${message}`;
+        eventLog.textContent = `${line}\n${eventLog.textContent}`;
+      }
+
+      function setStatus(el, message, kind = 'info') {
+        el.textContent = message;
+        el.className = `status show ${kind}`;
+      }
+
+      function clearStatus(el) {
+        el.textContent = '';
+        el.className = 'status';
+      }
+
+      function parseLatLon(latRaw, lonRaw) {
+        const lat = Number(latRaw);
+        const lon = Number(lonRaw);
+
+        if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+          throw new Error('Latitude must be between -90 and 90.');
+        }
+
+        if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
+          throw new Error('Longitude must be between -180 and 180.');
+        }
+
+        return { lat, lon };
+      }
+
+      function parseIsoMs(value) {
+        if (!value || typeof value !== 'string') {
+          return null;
+        }
+
+        const epochMs = Date.parse(value);
+        return Number.isNaN(epochMs) ? null : epochMs;
+      }
+
+      function buildLocationPayload() {
+        const appId = appIdInput.value.trim();
+        const clientId = clientIdInput.value.trim();
+        const { lat, lon } = parseLatLon(latInput.value, lonInput.value);
+
+        if (!appId || !clientId) {
+          throw new Error('app_id and client_id are required.');
+        }
+
+        return {
+          app_id: appId,
+          client_id: clientId,
+          timestamp: new Date().toISOString(),
+          location: { lat, lon },
+        };
+      }
+
+      async function sendLocationUpdateOnce() {
+        const endpoint = locationEndpointInput.value.trim();
+        if (!endpoint) {
+          throw new Error('Location endpoint is required.');
+        }
+
+        const payload = buildLocationPayload();
+
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          let message = `Location update failed with status ${response.status}.`;
+          try {
+            const body = await response.json();
+            if (body?.message) {
+              message = body.message;
+            }
+          } catch {}
+          throw new Error(message);
+        }
+      }
+
+      async function fetchWebSocketUrl() {
+        const endpoint = systemWsEndpointInput.value.trim();
+        if (!endpoint) {
+          throw new Error('System websocket URL endpoint is required.');
+        }
+
+        const response = await fetch(endpoint, { method: 'GET' });
+        if (!response.ok) {
+          throw new Error(`Failed to fetch websocket URL: ${response.status}`);
+        }
+
+        const body = await response.json();
+        if (!body?.websocket_url) {
+          throw new Error('websocket_url missing from system API response.');
+        }
+
+        websocketUrl = body.websocket_url;
+        wsUrlDisplay.value = websocketUrl;
+        return websocketUrl;
+      }
+
+      function closeWebSocket() {
+        if (!websocket) {
+          return;
+        }
+
+        try {
+          websocket.close();
+        } catch {}
+        websocket = null;
+      }
+
+      async function ensureWebSocketConnected() {
+        const appId = appIdInput.value.trim();
+        const clientId = clientIdInput.value.trim();
+
+        if (!appId || !clientId) {
+          throw new Error('app_id and client_id are required for websocket connect.');
+        }
+
+        if (!websocketUrl) {
+          await fetchWebSocketUrl();
+        }
+
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
+          return;
+        }
+
+        closeWebSocket();
+
+        const connectUrl = `${websocketUrl}?app_id=${encodeURIComponent(appId)}&client_id=${encodeURIComponent(clientId)}`;
+
+        await new Promise((resolve, reject) => {
+          const ws = new WebSocket(connectUrl);
+          let settled = false;
+
+          const timeout = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            try { ws.close(); } catch {}
+            reject(new Error('Websocket connect timed out.'));
+          }, 10000);
+
+          ws.addEventListener('open', () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            websocket = ws;
+            appendLog('WebSocket connected.');
+            resolve();
+          });
+
+          ws.addEventListener('message', (event) => {
+            const nowEpochMs = Date.now();
+            let parsed = null;
+            try {
+              parsed = JSON.parse(event.data);
+            } catch {
+              parsed = event.data;
+            }
+
+            let matchedRtt = null;
+            const debugMeta = parsed?.message?._debug_meta ?? parsed?._debug_meta ?? {};
+            const messageId = debugMeta?.message_id ?? parsed?.message_id;
+            const messageCountRaw = debugMeta?.message_count ?? parsed?.message_count;
+            const clientSentAt = debugMeta?.client_sent_at ?? parsed?.client_sent_at;
+            const messageCount = Number.isFinite(Number(messageCountRaw))
+              ? Number(messageCountRaw)
+              : null;
+            let matchedBy = null;
+
+            const pendingById = messageId && pendingBroadcastByMessageId.has(messageId);
+            const pendingByCount =
+              messageCount !== null && pendingBroadcastByMessageCount.has(messageCount);
+
+            if (pendingById) {
+              pendingBroadcastByMessageId.delete(messageId);
+              if (messageCount !== null) {
+                pendingBroadcastByMessageCount.delete(messageCount);
+              }
+              matchedBy = 'message_id';
+            } else if (pendingByCount) {
+              pendingBroadcastByMessageCount.delete(messageCount);
+              matchedBy = 'message_count';
+            }
+
+            const sentEpochMs = parseIsoMs(clientSentAt);
+            if (sentEpochMs !== null) {
+              matchedRtt = nowEpochMs - sentEpochMs;
+            }
+
+            if (matchedRtt !== null) {
+              matchedRttValues.push(matchedRtt);
+              updateRttMetrics(matchedRtt);
+
+              const row = findBroadcastRow(messageId, messageCount);
+              if (row) {
+                Object.assign(row, {
+                  status: 'MATCHED',
+                  wsReceivedAt: new Date().toISOString(),
+                  rttMs: matchedRtt,
+                  details:
+                    `Matched websocket message` +
+                    `${matchedBy ? ` by ${matchedBy}` : ''} (count=${messageCount ?? '-'}) using client_sent_at`,
+                });
+                renderBroadcastTable();
+              }
+            }
+
+            appendLog(
+              `WS message received${matchedRtt !== null ? ` | matched RTT=${matchedRtt.toFixed(2)}ms` : ''}` +
+              `${messageId ? ` | id=${messageId}` : ''}${messageCount ? ` | count=${messageCount}` : ''}: ` +
+              `${typeof parsed === 'string' ? parsed : JSON.stringify(parsed)}`
+            );
+          });
+
+          ws.addEventListener('close', () => {
+            appendLog('WebSocket closed.');
+            if (websocket === ws) {
+              websocket = null;
+            }
+
+            if (updateTimer !== null) {
+              appendLog('Updater still running; reconnecting websocket in 1s...');
+              setTimeout(() => {
+                ensureWebSocketConnected().catch((error) => {
+                  appendLog(`WebSocket reconnect failed: ${error.message || error}`);
+                });
+              }, 1000);
+            }
+          });
+
+          ws.addEventListener('error', () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            reject(new Error('Websocket connection failed.'));
+          });
+        });
+      }
+
+      function updateRttMetrics(lastRtt) {
+        lastRttEl.textContent = Number.isFinite(lastRtt) ? lastRtt.toFixed(2) : '-';
+
+        if (matchedRttValues.length === 0) {
+          avgRttEl.textContent = '-';
+          rttCountEl.textContent = '0';
+          return;
+        }
+
+        const sum = matchedRttValues.reduce((acc, value) => acc + value, 0);
+        avgRttEl.textContent = (sum / matchedRttValues.length).toFixed(2);
+        rttCountEl.textContent = String(matchedRttValues.length);
+      }
+
+      async function startRunner() {
+        clearStatus(runnerStatus);
+
+        if (updateTimer !== null) {
+          setStatus(runnerStatus, 'Updater already running.', 'info');
+          return;
+        }
+
+        try {
+          await sendLocationUpdateOnce();
+          await ensureWebSocketConnected();
+        } catch (error) {
+          setStatus(runnerStatus, error.message || String(error), 'error');
+          return;
+        }
+
+        updateTimer = setInterval(async () => {
+          try {
+            await sendLocationUpdateOnce();
+            runnerMeta.textContent = `Updater running. Interval: ${UPDATE_INTERVAL_MS}ms | last update: ${new Date().toISOString()}`;
+          } catch (error) {
+            appendLog(`Periodic location update failed: ${error.message || error}`);
+          }
+        }, UPDATE_INTERVAL_MS);
+
+        setStatus(runnerStatus, 'Periodic updates started and websocket connected.', 'success');
+      }
+
+      function stopRunner() {
+        if (updateTimer !== null) {
+          clearInterval(updateTimer);
+          updateTimer = null;
+        }
+        closeWebSocket();
+        setStatus(runnerStatus, 'Updater stopped and websocket closed.', 'info');
+        runnerMeta.textContent = 'Updater stopped. Interval: 500ms.';
+      }
+
+      function buildBroadcastPayload() {
+        const appId = appIdInput.value.trim();
+        const endpoint = broadcastEndpointInput.value.trim();
+        const radiusM = Number(radiusMInput.value);
+        const { lat, lon } = parseLatLon(broadcastLatInput.value, broadcastLonInput.value);
+
+        if (!endpoint) {
+          throw new Error('Broadcast endpoint is required.');
+        }
+
+        if (!appId) {
+          throw new Error('app_id is required.');
+        }
+
+        if (!Number.isFinite(radiusM) || radiusM <= 0) {
+          throw new Error('Radius must be a positive number.');
+        }
+
+        let customMessage;
+        try {
+          customMessage = JSON.parse(messageJsonInput.value);
+        } catch (error) {
+          throw new Error(`Message JSON is invalid: ${error.message || error}`);
+        }
+
+        broadcastCount += 1;
+        const messageId = `broadcast-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+        const clientSentAt = new Date().toISOString();
+
+        let messageToSend;
+        if (customMessage && typeof customMessage === 'object' && !Array.isArray(customMessage)) {
+          messageToSend = {
+            ...customMessage,
+            _debug_meta: {
+              message_id: messageId,
+              message_count: broadcastCount,
+              client_sent_at: clientSentAt,
+            },
+          };
+        } else {
+          messageToSend = {
+            payload: customMessage,
+            _debug_meta: {
+              message_id: messageId,
+              message_count: broadcastCount,
+              client_sent_at: clientSentAt,
+            },
+          };
+        }
+
+        return {
+          endpoint,
+          messageId,
+          messageCount: broadcastCount,
+          clientSentAt,
+          body: {
+            app_id: appId,
+            origin: { lat, lon },
+            radius_m: radiusM,
+            message: messageToSend,
+          },
+        };
+      }
+
+      async function sendBroadcast() {
+        clearStatus(broadcastStatus);
+
+        let payloadBundle;
+        try {
+          payloadBundle = buildBroadcastPayload();
+        } catch (error) {
+          setStatus(broadcastStatus, error.message || String(error), 'error');
+          return;
+        }
+
+        sendBroadcastBtn.disabled = true;
+        const startPerf = performance.now();
+        pendingBroadcastByMessageId.set(payloadBundle.messageId, startPerf);
+        pendingBroadcastByMessageCount.set(payloadBundle.messageCount, startPerf);
+
+        addBroadcastRow({
+          status: 'SENT',
+          messageId: payloadBundle.messageId,
+          messageCount: payloadBundle.messageCount,
+          clientSentAt: payloadBundle.clientSentAt,
+          broadcastAckAt: null,
+          wsReceivedAt: null,
+          rttMs: null,
+          details: 'Broadcast request sent to HTTP endpoint.',
+        });
+
+        try {
+          const response = await fetch(payloadBundle.endpoint, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payloadBundle.body),
+          });
+
+          const responseBody = await response.json().catch(() => ({}));
+          appendLog(`Broadcast response: ${JSON.stringify(responseBody)}`);
+
+          updateBroadcastRow(payloadBundle.messageId, {
+            broadcastAckAt: new Date().toISOString(),
+            details:
+              `nearby=${responseBody?.nearby_client_count ?? '-'}, ` +
+              `candidates=${responseBody?.websocket_candidate_count ?? '-'}, ` +
+              `delivered=${responseBody?.delivered_count ?? '-'}, failed=${responseBody?.failed_count ?? '-'}`,
+          });
+
+          if (!response.ok) {
+            pendingBroadcastByMessageId.delete(payloadBundle.messageId);
+            pendingBroadcastByMessageCount.delete(payloadBundle.messageCount);
+            updateBroadcastRow(payloadBundle.messageId, {
+              status: 'FAILED',
+            });
+            throw new Error(responseBody?.message || `Broadcast failed with status ${response.status}`);
+          }
+
+          const websocketCandidateCount = Number(responseBody?.websocket_candidate_count ?? 0);
+          const deliveredCount = Number(responseBody?.delivered_count ?? 0);
+          const failedCount = Number(responseBody?.failed_count ?? 0);
+
+          if (websocketCandidateCount === 0) {
+            pendingBroadcastByMessageId.delete(payloadBundle.messageId);
+            pendingBroadcastByMessageCount.delete(payloadBundle.messageCount);
+            updateBroadcastRow(payloadBundle.messageId, {
+              status: 'NO_MATCH',
+              details: 'No websocket delivery candidate (delivered_count = 0).',
+            });
+            setStatus(
+              broadcastStatus,
+              'Broadcast invoked, but delivered_count is 0 so no RTT can be measured.',
+              'info'
+            );
+            return;
+          }
+
+          if (deliveredCount === 0 && failedCount > 0) {
+            pendingBroadcastByMessageId.delete(payloadBundle.messageId);
+            pendingBroadcastByMessageCount.delete(payloadBundle.messageCount);
+            updateBroadcastRow(payloadBundle.messageId, {
+              status: 'FAILED',
+              details: 'Websocket candidate exists, but all sends failed. Check backend logs.',
+            });
+            setStatus(
+              broadcastStatus,
+              'Broadcast reached websocket candidates but sends failed (failed_count > 0).',
+              'error'
+            );
+            return;
+          }
+
+          setStatus(
+            broadcastStatus,
+            'Broadcast invoked. Waiting for websocket message to compute RTT...',
+            'success'
+          );
+
+          setTimeout(() => {
+            if (pendingBroadcastByMessageId.has(payloadBundle.messageId)) {
+              pendingBroadcastByMessageId.delete(payloadBundle.messageId);
+              pendingBroadcastByMessageCount.delete(payloadBundle.messageCount);
+              updateBroadcastRow(payloadBundle.messageId, {
+                status: 'NO_MATCH',
+                details: 'No matching websocket receive within timeout window.',
+              });
+              appendLog(`No matching websocket message yet for message ${payloadBundle.messageId}.`);
+            }
+          }, 15000);
+        } catch (error) {
+          setStatus(broadcastStatus, error.message || String(error), 'error');
+        } finally {
+          sendBroadcastBtn.disabled = false;
+        }
+      }
+
+      useDeviceBtn.addEventListener('click', () => {
+        clearStatus(runnerStatus);
+
+        if (!navigator.geolocation) {
+          setStatus(runnerStatus, 'This browser does not support geolocation.', 'error');
+          return;
+        }
+
+        setStatus(runnerStatus, 'Loading device location...', 'info');
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            const lat = position.coords.latitude;
+            const lon = position.coords.longitude;
+            latInput.value = String(lat);
+            lonInput.value = String(lon);
+            broadcastLatInput.value = String(lat);
+            broadcastLonInput.value = String(lon);
+            setStatus(runnerStatus, 'Device location loaded.', 'success');
+          },
+          (error) => {
+            let message = 'Failed to get device location.';
+            if (error.code === error.PERMISSION_DENIED) message = 'Location permission denied.';
+            if (error.code === error.POSITION_UNAVAILABLE) message = 'Location unavailable.';
+            if (error.code === error.TIMEOUT) message = 'Location request timed out.';
+            setStatus(runnerStatus, message, 'error');
+          },
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 3000 }
+        );
+      });
+
+      startBtn.addEventListener('click', () => {
+        startRunner().catch((error) => {
+          setStatus(runnerStatus, error.message || String(error), 'error');
+        });
+      });
+
+      stopBtn.addEventListener('click', stopRunner);
+      sendBroadcastBtn.addEventListener('click', sendBroadcast);
+
+      clearLogBtn.addEventListener('click', () => {
+        eventLog.textContent = '[log cleared]';
+        matchedRttValues.length = 0;
+        pendingBroadcastByMessageId.clear();
+        pendingBroadcastByMessageCount.clear();
+        broadcastRows.length = 0;
+        updateRttMetrics(null);
+        renderBroadcastTable();
+      });
+
+      window.addEventListener('beforeunload', () => {
+        stopRunner();
+      });
+
+      renderBroadcastTable();
+    </script>
+  </body>
+</html>

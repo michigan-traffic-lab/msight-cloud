@@ -4,7 +4,10 @@ import type {
 } from 'aws-lambda';
 import { HealthResponseSchema } from '../../shared/schemas/location';
 import { buildOpenApiDocument } from '../../shared/openapi';
-import { VersionResponseSchema } from '../../shared/schemas/system';
+import {
+  VersionResponseSchema,
+  WebSocketUrlResponseSchema,
+} from '../../shared/schemas/system';
 
 function jsonResponse(
   statusCode: number,
@@ -50,6 +53,25 @@ export async function handler(
       service: serviceName,
       api_version: apiVersion,
       build_id: process.env.BUILD_ID ?? 'unknown',
+      server_timestamp: new Date().toISOString(),
+    });
+
+    return jsonResponse(200, response);
+  }
+
+  if (method === 'GET' && path === '/system/websocket-url') {
+    const wsApiUrl = process.env.WS_API_URL ?? '';
+
+    if (!wsApiUrl) {
+      return jsonResponse(503, {
+        error: 'websocket_unavailable',
+        message: 'WebSocket URL is not configured.',
+      });
+    }
+
+    const response = WebSocketUrlResponseSchema.parse({
+      websocket_url: wsApiUrl,
+      api_version: apiVersion,
       server_timestamp: new Date().toISOString(),
     });
 

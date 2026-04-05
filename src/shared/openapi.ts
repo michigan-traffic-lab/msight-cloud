@@ -6,7 +6,14 @@ import {
   LocationUpdateRequestSchema,
 } from './schemas/location';
 import { LatencyProbeResponseSchema } from './schemas/latency';
-import { VersionResponseSchema } from './schemas/system';
+import {
+  VersionResponseSchema,
+  WebSocketUrlResponseSchema,
+} from './schemas/system';
+import {
+  RadiusBroadcastRequestSchema,
+  RadiusBroadcastResponseSchema,
+} from './schemas/radius-broadcast';
 
 const registry = new OpenAPIRegistry();
 
@@ -80,6 +87,37 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: 'post',
+  path: '/v1/clients/notify/radius',
+  summary: 'Broadcast custom message to nearby websocket clients',
+  description:
+    'Finds clients within the requested radius from Valkey GEO index, resolves websocket connection metadata from Valkey client hashes, and sends a custom payload to each active websocket connection.',
+  request: {
+    body: {
+      required: true,
+      content: {
+        'application/json': {
+          schema: RadiusBroadcastRequestSchema,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: 'Broadcast attempted for matching nearby clients.',
+      content: {
+        'application/json': {
+          schema: RadiusBroadcastResponseSchema,
+        },
+      },
+    },
+    400: {
+      description: 'Invalid request payload.',
+    },
+  },
+});
+
+registry.registerPath({
   method: 'get',
   path: '/v1/clients/location/health',
   summary: 'Location API health check',
@@ -132,6 +170,22 @@ registry.registerPath({
       content: {
         'application/json': {
           schema: VersionResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
+  path: '/system/websocket-url',
+  summary: 'System API websocket base URL',
+  responses: {
+    200: {
+      description: 'WebSocket API base URL for client connection bootstrap.',
+      content: {
+        'application/json': {
+          schema: WebSocketUrlResponseSchema,
         },
       },
     },
