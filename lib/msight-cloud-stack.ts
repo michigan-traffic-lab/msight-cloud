@@ -504,6 +504,12 @@ export class MsightCloudStack extends cdk.Stack {
       integration: radiusBroadcastIntegration,
     });
 
+    httpApi.addRoutes({
+      path: '/v1/clients/notify/radius/health',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: radiusBroadcastIntegration,
+    });
+
     const wsApi = new apigwv2.WebSocketApi(this, 'MsightWsApi', {
       apiName: 'msight-ws-api',
       connectRouteOptions: {

@@ -13,6 +13,7 @@ import {
   RadiusBroadcastResponseSchema,
   type RadiusBroadcastRequest,
 } from '../../shared/schemas/radius-broadcast';
+import { HealthResponseSchema } from '../../shared/schemas/location';
 
 const DEFAULT_ZONE_ID = 'zone01';
 const DEFAULT_LIMIT = 500;
@@ -259,6 +260,19 @@ export async function handler(
   const method = event.requestContext.http.method;
   const path = event.rawPath;
   const apiVersion = process.env.API_VERSION ?? 'v1';
+  const serviceName = process.env.SERVICE_NAME ?? 'radius-broadcast-api';
+
+  if (method === 'GET' && path === '/v1/clients/notify/radius/health') {
+    const response = HealthResponseSchema.parse({
+      status: 'ok',
+      message: 'Radius broadcast API is healthy.',
+      service: serviceName,
+      api_version: apiVersion,
+      server_timestamp: new Date().toISOString(),
+    });
+
+    return jsonResponse(200, response);
+  }
 
   if (method !== 'POST' || path !== '/v1/clients/notify/radius') {
     return jsonResponse(404, {

@@ -135,6 +135,22 @@ registry.registerPath({
 
 registry.registerPath({
   method: 'get',
+  path: '/v1/clients/notify/radius/health',
+  summary: 'Radius broadcast API health check',
+  responses: {
+    200: {
+      description: 'Radius broadcast API is healthy.',
+      content: {
+        'application/json': {
+          schema: HealthResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
   path: '/system/health',
   summary: 'System API health check',
   responses: {
