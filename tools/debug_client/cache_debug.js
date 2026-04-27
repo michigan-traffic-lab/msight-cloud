@@ -75,11 +75,14 @@ function printHelp() {
   console.log('  examples                      Show common query examples');
   console.log('  ping                          Send {"action":"ping"}');
   console.log('  get <key>                     Send {"action":"get","key":"..."}');
+  console.log('  hget <key> <field>            Send {"action":"hget","key":"...","field":"..."}');
+  console.log('  hgetall <key>                 Send {"action":"hgetall","key":"..."}');
   console.log('  set <key> <value> [ttl]       Send set; TTL is optional seconds');
   console.log('  ttl <key>                     Send TTL query');
   console.log('  type <key>                    Send TYPE query');
   console.log('  exists <key>                  Send EXISTS query');
   console.log('  del <key>                     Send DEL query');
+  console.log('  flushdb confirm               Clear the current Valkey database (requires literal confirm)');
   console.log('  scan <patternOrPrefix> [max]  Scan keys by pattern (prefix auto-appends *)');
   console.log('  dump <patternOrPrefix> [max]  Fetch key/value entries for matching keys');
   console.log('  raw <json>                    Send a fully custom payload JSON');
@@ -88,6 +91,8 @@ function printHelp() {
   console.log('Tips:');
   console.log("  - Quote values with spaces: set my:key \"hello world\" 120");
   console.log("  - Start with 'ping', then 'type <key>', then 'get <key>' to inspect safely.");
+  console.log("  - For hashes use: hgetall <key> or hget <key> <field>.");
+  console.log("  - flushdb is destructive. Use exactly: flushdb confirm");
   console.log("  - For prefix lookup use: scan msight    (expands to pattern 'msight*').");
   console.log("  - For key/value pairs use: dump msight- (expands to pattern 'msight-*').");
   console.log('');
@@ -99,8 +104,11 @@ function printExamples() {
   console.log('  ping');
   console.log('  type location:device-123');
   console.log('  get location:device-123');
+  console.log('  hgetall msight:zone01:msight-demo:client:client-001');
+  console.log('  hget msight:zone01:msight-demo:client:client-001 ws_connection_id');
   console.log('  ttl location:device-123');
   console.log('  set test:key "temporary value" 180');
+  console.log('  flushdb confirm');
   console.log('  scan msight');
   console.log('  scan msight* 5000');
   console.log('  dump msight- 2000');
@@ -150,11 +158,18 @@ function buildPayloadFromCommand(tokens) {
     return { action: 'ping' };
   }
 
-  if (command === 'get' || command === 'ttl' || command === 'type' || command === 'exists' || command === 'del') {
+  if (command === 'get' || command === 'ttl' || command === 'type' || command === 'exists' || command === 'del' || command === 'hgetall') {
     if (!tokens[1]) {
       throw new Error(`${command} requires <key>. Example: ${command} location:device-123`);
     }
     return { action: command, key: tokens[1] };
+  }
+
+  if (command === 'hget') {
+    if (!tokens[1] || !tokens[2]) {
+      throw new Error('hget requires <key> <field>. Example: hget my:hash myfield');
+    }
+    return { action: command, key: tokens[1], field: tokens[2] };
   }
 
   if (command === 'set') {
@@ -177,6 +192,17 @@ function buildPayloadFromCommand(tokens) {
     }
 
     return payload;
+  }
+
+  if (command === 'flushdb') {
+    if (tokens[1] !== 'confirm') {
+      throw new Error('flushdb requires the literal confirmation token. Example: flushdb confirm');
+    }
+
+    return {
+      action: 'flushdb',
+      confirm: 'FLUSHDB',
+    };
   }
 
   if (command === 'scan') {

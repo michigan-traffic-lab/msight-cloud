@@ -271,6 +271,15 @@ export class MsightCloudStack extends cdk.Stack {
       securityGroups: [vpcEndpointSg],
     });
 
+    // Keep Lambda invoke traffic on private AWS network for VPC-bound functions.
+    new ec2.InterfaceVpcEndpoint(this, 'LambdaVpcEndpoint', {
+      vpc,
+      service: ec2.InterfaceVpcEndpointAwsService.LAMBDA,
+      subnets: appSubnetSelection,
+      open: false,
+      securityGroups: [vpcEndpointSg],
+    });
+
     // -------------------------
     // Lambda Common Config
     // -------------------------
@@ -281,6 +290,17 @@ export class MsightCloudStack extends cdk.Stack {
       vpc,
       vpcSubnets: appSubnetSelection,
       securityGroups: [lambdaSg],
+      bundling: {
+        minify: true,
+        sourceMap: false,
+        target: 'node22',
+      },
+    };
+
+    const publicLambdaProps = {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(10),
       bundling: {
         minify: true,
         sourceMap: false,
@@ -350,9 +370,24 @@ export class MsightCloudStack extends cdk.Stack {
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
         CACHE_TLS_ENABLED: 'true',
         LOCATION_ZONE_ID: 'zone01',
-        WS_SEND_TIMEOUT_MS: '3000',
       },
     });
+
+    const wsSenderLambda = new NodejsFunction(this, 'WsSenderLambda', {
+      ...publicLambdaProps,
+      entry: path.join(__dirname, '../src/functions/ws-send/handler.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        API_VERSION: 'v1',
+        SERVICE_NAME: 'ws-send',
+        BUILD_ID: buildId,
+        WS_SEND_TIMEOUT_MS: '10000',
+      },
+    });
+
+    radiusBroadcastLambda.addEnvironment('WS_SEND_LAMBDA_NAME', wsSenderLambda.functionName);
+    wsSenderLambda.grantInvoke(radiusBroadcastLambda);
 
     // -------------------------
     // System Lambda
@@ -550,7 +585,7 @@ export class MsightCloudStack extends cdk.Stack {
       })
     );
 
-    radiusBroadcastLambda.addToRolePolicy(
+    wsSenderLambda.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['execute-api:ManageConnections'],
         resources: [wsManageConnectionsArn],

@@ -2,6 +2,11 @@
     "chat.tools.terminal.autoApprove": {
         "aws": true,
         "npx.cmd": true,
-        "npm.cmd": true
+        "npm.cmd": true,
+        "/^cmd /c aws sts get-caller-identity$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "&": true
     }
 }

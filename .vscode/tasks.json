@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Deploy MsightCloudStack us-east-1",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set CDK_DEFAULT_ACCOUNT=162092913718&& set CDK_DEFAULT_REGION=us-east-1&& .\\node_modules\\.bin\\cdk.cmd deploy MsightCloudStack --require-approval never"
+			],
+			"isBackground": true
+		}
+	]
+}

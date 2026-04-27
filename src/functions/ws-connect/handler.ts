@@ -19,6 +19,12 @@ function buildWsConnectionLookupKey(connectionId: string): string {
   return `msight:${getZoneId()}:ws:connection:${connectionId}`;
 }
 
+type ExistingWsConnection = {
+  connectionId: string;
+  domainName: string;
+  stage: string;
+};
+
 function isValidIdentityPart(value: string): boolean {
   return /^[a-zA-Z0-9._:-]{1,128}$/.test(value);
 }
@@ -34,22 +40,20 @@ function jsonResponse(statusCode: number, body: Record<string, unknown>): APIGat
 }
 
 async function closeExistingConnectionIfAny(
-  domainName: string,
-  stage: string,
-  oldConnectionId: string,
+  existingConnection: ExistingWsConnection | null,
   newConnectionId: string
 ): Promise<void> {
-  if (!oldConnectionId || oldConnectionId === newConnectionId) {
+  if (!existingConnection || existingConnection.connectionId === newConnectionId) {
     return;
   }
 
-  const endpoint = `https://${domainName}/${stage}`;
+  const endpoint = `https://${existingConnection.domainName}/${existingConnection.stage}`;
   const client = new ApiGatewayManagementApiClient({ endpoint });
 
   try {
     await client.send(
       new DeleteConnectionCommand({
-        ConnectionId: oldConnectionId,
+        ConnectionId: existingConnection.connectionId,
       })
     );
   } catch (error) {
@@ -57,12 +61,48 @@ async function closeExistingConnectionIfAny(
     if (
       message.includes('GoneException') ||
       message.includes('status code 410') ||
-      message.includes('No method found matching route')
+      message.includes('status code 404') ||
+      message.includes('No method found matching route') ||
+      message.includes('ForbiddenException')
     ) {
       return;
     }
-    throw error;
+
+    console.warn('best-effort cleanup of old websocket connection failed', {
+      oldConnectionId: existingConnection.connectionId,
+      endpoint,
+      error,
+    });
   }
+}
+
+async function getExistingWsConnection(clientKey: string): Promise<ExistingWsConnection | null> {
+  const existingWsFields = await sendValkeyArrayCommand([
+    'HMGET',
+    clientKey,
+    'ws_connection_id',
+    'ws_domain_name',
+    'ws_stage',
+  ]);
+
+  if (!Array.isArray(existingWsFields) || existingWsFields.length < 3) {
+    return null;
+  }
+
+  const connectionId =
+    typeof existingWsFields[0] === 'string' ? existingWsFields[0] : '';
+  const domainName = typeof existingWsFields[1] === 'string' ? existingWsFields[1] : '';
+  const stage = typeof existingWsFields[2] === 'string' ? existingWsFields[2] : '';
+
+  if (!connectionId || !domainName || !stage) {
+    return null;
+  }
+
+  return {
+    connectionId,
+    domainName,
+    stage,
+  };
 }
 
 export async function handler(
@@ -106,14 +146,9 @@ export async function handler(
   const connectionLookupKey = buildWsConnectionLookupKey(connectionId);
 
   try {
-    const existingConnectionValue = await sendValkeyArrayCommand([
-      'HGET',
-      clientKey,
-      'ws_connection_id',
-    ]);
-    const existingConnectionId = existingConnectionValue === null ? '' : String(existingConnectionValue);
+    const existingConnection = await getExistingWsConnection(clientKey);
 
-    await closeExistingConnectionIfAny(domainName, stage, existingConnectionId, connectionId);
+    await closeExistingConnectionIfAny(existingConnection, connectionId);
 
     await sendValkeyArrayCommand([
       'HSET',

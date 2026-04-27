@@ -2,11 +2,7 @@ import type {
   APIGatewayProxyEventV2,
   APIGatewayProxyStructuredResultV2,
 } from 'aws-lambda';
-import {
-  ApiGatewayManagementApiClient,
-  GoneException,
-  PostToConnectionCommand,
-} from '@aws-sdk/client-apigatewaymanagementapi';
+import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { sendValkeyArrayCommand } from '../../shared/valkey-client.js';
 import {
   RadiusBroadcastRequestSchema,
@@ -17,7 +13,7 @@ import { HealthResponseSchema } from '../../shared/schemas/location';
 
 const DEFAULT_ZONE_ID = 'zone01';
 const DEFAULT_LIMIT = 500;
-const DEFAULT_WS_SEND_TIMEOUT_MS = 3000;
+const lambdaClient = new LambdaClient({});
 
 function jsonResponse(
   statusCode: number,
@@ -57,6 +53,18 @@ type WsInfo = {
   connectionId: string;
   domainName: string;
   stage: string;
+};
+
+type WsSendEvent = {
+  app_id: string;
+  message: unknown;
+  items: WsInfo[];
+};
+
+type WsSendResult = {
+  deliveredCount: number;
+  failedCount: number;
+  goneConnectionIds: string[];
 };
 
 async function getClientWsInfo(appId: string, clientId: string): Promise<WsInfo | null> {
@@ -117,25 +125,41 @@ async function clearWsInfoIfSameConnection(
   ]);
 }
 
-function getWsEndpoint(domainName: string, stage: string): string {
-  if (domainName && stage) {
-    return `https://${domainName}/${stage}`;
+async function invokeWsSender(event: WsSendEvent): Promise<WsSendResult> {
+  const functionName = process.env.WS_SEND_LAMBDA_NAME?.trim();
+  if (!functionName) {
+    throw new Error('WS_SEND_LAMBDA_NAME is not configured.');
   }
 
-  const configuredEndpoint = process.env.WS_MANAGEMENT_ENDPOINT?.trim();
-  if (configuredEndpoint) {
-    return configuredEndpoint;
+  const response = await lambdaClient.send(
+    new InvokeCommand({
+      FunctionName: functionName,
+      InvocationType: 'RequestResponse',
+      Payload: Buffer.from(JSON.stringify(event), 'utf8'),
+    })
+  );
+
+  if (response.FunctionError) {
+    const errorPayload = response.Payload
+      ? Buffer.from(response.Payload).toString('utf8')
+      : '';
+    throw new Error(`ws-send invocation failed: ${response.FunctionError} ${errorPayload}`.trim());
   }
 
-  throw new Error('No websocket management endpoint available for connection.');
-}
-
-function getWsSendTimeoutMs(): number {
-  const value = Number(process.env.WS_SEND_TIMEOUT_MS ?? DEFAULT_WS_SEND_TIMEOUT_MS);
-  if (!Number.isFinite(value) || value <= 0) {
-    return DEFAULT_WS_SEND_TIMEOUT_MS;
+  if (!response.Payload) {
+    throw new Error('ws-send invocation returned no payload.');
   }
-  return Math.floor(value);
+
+  const payloadText = Buffer.from(response.Payload).toString('utf8');
+  const parsed = JSON.parse(payloadText) as Partial<WsSendResult>;
+
+  return {
+    deliveredCount: Number(parsed.deliveredCount ?? 0),
+    failedCount: Number(parsed.failedCount ?? 0),
+    goneConnectionIds: Array.isArray(parsed.goneConnectionIds)
+      ? parsed.goneConnectionIds.filter((value): value is string => typeof value === 'string')
+      : [],
+  };
 }
 
 async function broadcastToRadius(request: RadiusBroadcastRequest): Promise<{
@@ -168,82 +192,29 @@ async function broadcastToRadius(request: RadiusBroadcastRequest): Promise<{
   );
   const wsInfos = wsInfosRaw.filter((item): item is WsInfo => item !== null);
 
-  const payloadBuffer = Buffer.from(
-    JSON.stringify({
-      app_id: request.app_id,
-      message: request.message,
-      server_timestamp: new Date().toISOString(),
-    }),
-    'utf8'
-  );
+  const sendResult = await invokeWsSender({
+    app_id: request.app_id,
+    message: request.message,
+    items: wsInfos,
+  });
 
-  const clientByEndpoint = new Map<string, ApiGatewayManagementApiClient>();
-  let deliveredCount = 0;
-  let failedCount = 0;
-  const goneConnectionIds: string[] = [];
-  const wsSendTimeoutMs = getWsSendTimeoutMs();
-
-  for (const wsInfo of wsInfos) {
-    const endpoint = getWsEndpoint(wsInfo.domainName, wsInfo.stage);
-    let wsClient = clientByEndpoint.get(endpoint);
-    if (!wsClient) {
-      wsClient = new ApiGatewayManagementApiClient({ endpoint });
-      clientByEndpoint.set(endpoint, wsClient);
-    }
-
-    try {
-      const abortController = new AbortController();
-      const abortTimer = setTimeout(() => abortController.abort(), wsSendTimeoutMs);
-
-      try {
-        await wsClient.send(
-          new PostToConnectionCommand({
-            ConnectionId: wsInfo.connectionId,
-            Data: payloadBuffer,
-          }),
-          {
-            abortSignal: abortController.signal,
-          }
-        );
-
-        deliveredCount += 1;
-      } finally {
-        clearTimeout(abortTimer);
-      }
-    } catch (error) {
-      failedCount += 1;
-
-      if (error instanceof GoneException) {
-        goneConnectionIds.push(wsInfo.connectionId);
-      }
-
-      const isTimeoutAbort =
-        error instanceof Error &&
-        (error.name === 'AbortError' || error.message.toLowerCase().includes('abort'));
-
-      console.error('broadcast send failed', {
-        appId: request.app_id,
-        clientId: wsInfo.clientId,
-        connectionId: wsInfo.connectionId,
-        endpoint,
-        wsSendTimeoutMs,
-        isTimeoutAbort,
-        error,
-      });
-    }
-  }
+  const deliveredCount = sendResult.deliveredCount;
+  const failedCount = sendResult.failedCount;
+  const goneConnectionIds = sendResult.goneConnectionIds;
 
   if (goneConnectionIds.length > 0) {
     const wsInfoByConnectionId = new Map(wsInfos.map((item) => [item.connectionId, item]));
 
-    for (const connectionId of goneConnectionIds) {
-      const wsInfo = wsInfoByConnectionId.get(connectionId);
-      if (!wsInfo) {
-        continue;
-      }
+    await Promise.all(
+      goneConnectionIds.map(async (connectionId) => {
+        const wsInfo = wsInfoByConnectionId.get(connectionId);
+        if (!wsInfo) {
+          return;
+        }
 
-      await clearWsInfoIfSameConnection(request.app_id, wsInfo.clientId, connectionId);
-    }
+        await clearWsInfoIfSameConnection(request.app_id, wsInfo.clientId, connectionId);
+      })
+    );
   }
 
   return {

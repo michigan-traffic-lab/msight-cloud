@@ -4,18 +4,23 @@ import { pingValkey, sendValkeyArrayCommand } from '../../shared/valkey-client';
 type DebugAction =
   | 'ping'
   | 'get'
+  | 'hget'
+  | 'hgetall'
   | 'set'
   | 'ttl'
   | 'type'
   | 'exists'
   | 'del'
   | 'scan'
-  | 'dump';
+  | 'dump'
+  | 'flushdb';
 
 type DebugEvent = {
   action?: string;
   key?: string;
+  field?: string;
   value?: string;
+  confirm?: string;
   ttlSeconds?: number;
   pattern?: string;
   count?: number;
@@ -40,13 +45,16 @@ function normalizeAction(action: string | undefined): DebugAction | null {
   if (
     normalized !== 'ping' &&
     normalized !== 'get' &&
+    normalized !== 'hget' &&
+    normalized !== 'hgetall' &&
     normalized !== 'set' &&
     normalized !== 'ttl' &&
     normalized !== 'type' &&
     normalized !== 'exists' &&
     normalized !== 'del' &&
     normalized !== 'scan' &&
-    normalized !== 'dump'
+    normalized !== 'dump' &&
+    normalized !== 'flushdb'
   ) {
     return null;
   }
@@ -153,7 +161,7 @@ export async function handler(event: DebugEvent, context: Context): Promise<Debu
   if (!action) {
     return failure(
       requestId,
-      'Invalid or missing action. Use one of: ping, get, set, ttl, type, exists, del, scan, dump.'
+      'Invalid or missing action. Use one of: ping, get, hget, hgetall, set, ttl, type, exists, del, scan, dump, flushdb.'
     );
   }
 
@@ -212,6 +220,18 @@ export async function handler(event: DebugEvent, context: Context): Promise<Debu
       });
     }
 
+    if (action === 'flushdb') {
+      if (event.confirm !== 'FLUSHDB') {
+        return failure(
+          requestId,
+          'Action "flushdb" requires confirm="FLUSHDB".'
+        );
+      }
+
+      const result = await sendValkeyArrayCommand(['FLUSHDB']);
+      return success(requestId, action, result === null ? '' : String(result));
+    }
+
     if (!event?.key || event.key.length === 0) {
       return failure(requestId, `Action "${action}" requires a non-empty key.`);
     }
@@ -219,6 +239,35 @@ export async function handler(event: DebugEvent, context: Context): Promise<Debu
     if (action === 'get') {
       const value = await sendValkeyArrayCommand(['GET', event.key]);
       return success(requestId, action, value === null ? null : String(value));
+    }
+
+    if (action === 'hget') {
+      if (!event.field || event.field.length === 0) {
+        return failure(requestId, 'Action "hget" requires a non-empty field.');
+      }
+
+      const value = await sendValkeyArrayCommand(['HGET', event.key, event.field]);
+      return success(requestId, action, value === null ? null : String(value));
+    }
+
+    if (action === 'hgetall') {
+      const value = await sendValkeyArrayCommand(['HGETALL', event.key]);
+
+      if (!Array.isArray(value)) {
+        return success(requestId, action, {});
+      }
+
+      const result: Record<string, string | null> = {};
+      for (let index = 0; index < value.length; index += 2) {
+        const field = value[index];
+        const fieldValue = value[index + 1];
+        if (typeof field !== 'string') {
+          continue;
+        }
+        result[field] = fieldValue === null ? null : String(fieldValue);
+      }
+
+      return success(requestId, action, result);
     }
 
     if (action === 'ttl') {
