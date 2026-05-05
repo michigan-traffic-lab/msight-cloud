@@ -28,6 +28,7 @@
     "@aws-sdk/client-lambda": "^3.1014.0",
     "@aws-sdk/client-rds-data": "^3.1014.0",
     "@aws-sdk/client-secrets-manager": "^3.1014.0",
+    "@aws-sdk/client-sns": "^3.1043.0",
     "aws-cdk-lib": "^2.244.0",
     "constructs": "^10.5.1",
     "pg": "^8.20.0",

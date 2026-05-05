@@ -6,6 +6,7 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as elasticache from 'aws-cdk-lib/aws-elasticache';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { WebSocketLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -386,6 +387,17 @@ export class MsightCloudStack extends cdk.Stack {
       },
     });
 
+    const sensorLambda = new NodejsFunction(this, 'SensorLambda', {
+      ...publicLambdaProps,
+      entry: path.join(__dirname, '../src/functions/sensor-api/handler.ts'),
+      handler: 'handler',
+      environment: {
+        API_VERSION: 'v1',
+        SERVICE_NAME: 'sensor-api',
+        BUILD_ID: buildId,
+      },
+    });
+
     radiusBroadcastLambda.addEnvironment('WS_SEND_LAMBDA_NAME', wsSenderLambda.functionName);
     wsSenderLambda.grantInvoke(radiusBroadcastLambda);
 
@@ -467,6 +479,11 @@ export class MsightCloudStack extends cdk.Stack {
       radiusBroadcastLambda
     );
 
+    const sensorIntegration = new HttpLambdaIntegration(
+      'SensorIntegration',
+      sensorLambda
+    );
+
     const wsConnectIntegration = new WebSocketLambdaIntegration(
       'WsConnectIntegration',
       wsConnectLambda
@@ -545,6 +562,29 @@ export class MsightCloudStack extends cdk.Stack {
       integration: radiusBroadcastIntegration,
     });
 
+    // -------------------------
+    // Sensor HTTP API (dual-stack IPv4 + IPv6)
+    // -------------------------
+    const sensorHttpApi = new apigwv2.HttpApi(this, 'MsightSensorHttpApi', {
+      apiName: 'msight-sensor-http-api',
+      ipAddressType: apigwv2.IpAddressType.DUAL_STACK,
+      corsPreflight: {
+        allowHeaders: ['content-type', 'x-partition-key'],
+        allowMethods: [
+          apigwv2.CorsHttpMethod.POST,
+          apigwv2.CorsHttpMethod.OPTIONS,
+        ],
+        allowOrigins: ['*'],
+        maxAge: cdk.Duration.hours(1),
+      },
+    });
+
+    sensorHttpApi.addRoutes({
+      path: '/v1/sensors/data',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: sensorIntegration,
+    });
+
     const wsApi = new apigwv2.WebSocketApi(this, 'MsightWsApi', {
       apiName: 'msight-ws-api',
       connectRouteOptions: {
@@ -601,6 +641,11 @@ export class MsightCloudStack extends cdk.Stack {
       value: httpApi.apiEndpoint,
     });
 
+    new cdk.CfnOutput(this, 'SensorHttpApiUrl', {
+      value: sensorHttpApi.apiEndpoint,
+      description: 'Dual-stack (IPv4 + IPv6) endpoint for sensor data ingestion.',
+    });
+
     new cdk.CfnOutput(this, 'WebSocketApiUrl', {
       value: wsApiUrl,
     });
@@ -619,6 +664,19 @@ export class MsightCloudStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DbInitCommand', {
       value: `node tools/init-db.js --cluster-arn ${cluster.clusterArn} --secret-arn ${cluster.secret!.secretArn} --db-name msight --region ${cdk.Stack.of(this).region}`,
       description: 'Run this command to initialize the database if this is the first deployment.',
+    });
+
+    // -------------------------
+    // SNS Topic (sensor fanout)
+    // -------------------------
+    const sensorTopic = new sns.Topic(this, 'MsightSensorTopic', {
+      topicName: 'msight-sensor-topic',
+      displayName: 'MSight Sensor Data Fanout',
+    });
+
+    new cdk.CfnOutput(this, 'SensorTopicArn', {
+      value: sensorTopic.topicArn,
+      description: 'SNS topic ARN for sensor data fanout. Subscribe Firehose, SQS, or Lambda here.',
     });
 
     if (cacheDebugLambda) {
