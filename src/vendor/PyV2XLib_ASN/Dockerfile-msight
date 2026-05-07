@@ -1,0 +1,5 @@
+FROM msight/msight
+RUN apt-get update
+WORKDIR /PyV2XLib
+COPY . .
+RUN pip3 install .

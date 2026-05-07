@@ -1,0 +1,9 @@
+import json
+
+from pyv2xlib.SPATDecoder import spat_decoder
+
+
+if __name__ == '__main__':
+    spat_msg = '00137b003852475e5bf720a1afbf94099050d9e76efebd34010e4d80002ad9ac00005800821a1161131d800851508a848ee68e0002b003043422c224d3002021a116112c3c01451508a7e8d008e0002b006043422c1a362003821a1189d23d402010d08c4e94c201a0860458400e043022c200782181160c04010c08c4e0'
+    dict_spat = spat_decoder(spat_msg)
+    print(json.dumps(dict_spat, indent=4))

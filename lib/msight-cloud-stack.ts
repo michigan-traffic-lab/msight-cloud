@@ -7,12 +7,16 @@ import * as elasticache from 'aws-cdk-lib/aws-elasticache';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { WebSocketLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from 'child_process';
 
 function collectTypeScriptFiles(rootDir: string): string[] {
   const filePaths: string[] = [];
@@ -632,6 +636,36 @@ export class MsightCloudStack extends cdk.Stack {
       })
     );
 
+    // -------------------------
+    // Expiration Cleanup Lambda
+    // -------------------------
+    const expirationCleanupLambda = new NodejsFunction(this, 'ExpirationCleanupLambda', {
+      ...commonLambdaProps,
+      entry: path.join(__dirname, '../src/functions/expiration-cleanup/handler.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(60),
+      environment: {
+        SERVICE_NAME: 'expiration-cleanup',
+        BUILD_ID: buildId,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+        LOCATION_ZONE_ID: 'zone01',
+      },
+    });
+
+    expirationCleanupLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['execute-api:ManageConnections'],
+        resources: [wsManageConnectionsArn],
+      })
+    );
+
+    new events.Rule(this, 'ExpirationCleanupSchedule', {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
+      targets: [new eventsTargets.LambdaFunction(expirationCleanupLambda)],
+    });
+
     systemLambda.addEnvironment('WS_API_URL', wsApiUrl);
 
     // -------------------------
@@ -678,6 +712,89 @@ export class MsightCloudStack extends cdk.Stack {
       value: sensorTopic.topicArn,
       description: 'SNS topic ARN for sensor data fanout. Subscribe Firehose, SQS, or Lambda here.',
     });
+
+    // -------------------------
+    // Sensor SNS consumer Lambda (Python)
+    // -------------------------
+
+    // Lambda Layer: installs pyv2xlib (local) + pycrate (PyPI) inside Docker
+    // Build the Lambda layer locally (no Docker needed — pycrate is pure Python).
+    // CDK runs this at synth time; the output is cached in .layer-build/pyv2x/.
+    // The cache is considered valid only when the python/ dir is non-empty.
+    const pyV2XLayerDir = path.join(__dirname, '../src/vendor/PyV2XLib_ASN');
+    const pyV2XLayerOutput = path.join(__dirname, '../.layer-build/pyv2x/python');
+    const layerCacheValid =
+      fs.existsSync(pyV2XLayerOutput) && fs.readdirSync(pyV2XLayerOutput).length > 0;
+    if (!layerCacheValid) {
+      fs.mkdirSync(pyV2XLayerOutput, { recursive: true });
+      // Install pyv2xlib + pycrate (pure Python — works cross-platform).
+      execSync(
+        `python -m pip install "${pyV2XLayerDir}" pycrate -t "${pyV2XLayerOutput}"`,
+        { stdio: 'inherit' },
+      );
+      // pycrate ships ~15 sub-packages for telecom protocols we don't need.
+      // Only pycrate_asn1rt, pycrate_asn1c (one utility import), and pycrate_core are used.
+      const keepPycrate = new Set(['pycrate_asn1rt', 'pycrate_asn1c', 'pycrate_core']);
+      for (const entry of fs.readdirSync(pyV2XLayerOutput)) {
+        if (entry.startsWith('pycrate') && !entry.endsWith('.dist-info') && !keepPycrate.has(entry)) {
+          fs.rmSync(path.join(pyV2XLayerOutput, entry), { recursive: true, force: true });
+        }
+      }
+      // Install psycopg2-binary for the Lambda Linux x86_64 target.
+      // We pull the manylinux wheel directly so Docker is not required.
+      execSync(
+        [
+          'python -m pip install psycopg2-binary',
+          `--platform manylinux2014_x86_64`,
+          `--python-version 3.12`,
+          `--only-binary=:all:`,
+          `-t "${pyV2XLayerOutput}"`,
+        ].join(' '),
+        { stdio: 'inherit' },
+      );
+      // Install redis-py (pure Python — no platform wheel needed).
+      execSync(
+        `python -m pip install redis -t "${pyV2XLayerOutput}"`,
+        { stdio: 'inherit' },
+      );
+    }
+
+    const pyV2XLayer = new lambda.LayerVersion(this, 'PyV2XLayer', {
+      code: lambda.Code.fromAsset(path.join(__dirname, '../.layer-build/pyv2x')),
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
+      description: 'pyv2xlib + pycrate + psycopg2 + redis — V2X ASN.1 decoding, PostgreSQL, and Valkey access',
+    });
+
+    const sensorSnsConsumerLambda = new lambda.Function(this, 'SensorSnsConsumerLambda', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      code: lambda.Code.fromAsset(path.join(__dirname, '../src/functions/sensor-sns-consumer')),
+      handler: 'handler.handler',
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      vpc,
+      vpcSubnets: appSubnetSelection,
+      securityGroups: [lambdaSg],
+      layers: [pyV2XLayer],
+      environment: {
+        SERVICE_NAME: 'sensor-sns-consumer',
+        BUILD_ID: buildId,
+        RADIUS_BROADCAST_LAMBDA_NAME: radiusBroadcastLambda.functionName,
+        DB_HOST: proxy.endpoint,
+        DB_PORT: '5432',
+        DB_NAME: 'msight',
+        DB_SECRET_ARN: cluster.secret!.secretArn,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+      },
+    });
+
+    cluster.secret!.grantRead(sensorSnsConsumerLambda);
+    radiusBroadcastLambda.grantInvoke(sensorSnsConsumerLambda);
+
+    sensorTopic.addSubscription(
+      new snsSubscriptions.LambdaSubscription(sensorSnsConsumerLambda)
+    );
 
     if (cacheDebugLambda) {
       new cdk.CfnOutput(this, 'CacheDebugLambdaName', {
