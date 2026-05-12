@@ -63,74 +63,81 @@ export async function handler(event: WsSendEvent, _context: Context): Promise<Ws
 
   const apiClientsByEndpoint = new Map<string, ApiGatewayManagementApiClient>();
 
-  let deliveredCount = 0;
-  let failedCount = 0;
-  const goneConnectionIds: string[] = [];
-
-  for (const item of items) {
-    const endpoint = `https://${item.domainName}/${item.stage}`;
-    const apiClient = getApiClient(endpoint, apiClientsByEndpoint);
-    const sendStartedAt = Date.now();
-
-    try {
-      const abortController = new AbortController();
-      const abortTimer = setTimeout(() => abortController.abort(), wsSendTimeoutMs);
+  const sendResults = await Promise.all(
+    items.map(async (item) => {
+      const endpoint = `https://${item.domainName}/${item.stage}`;
+      const apiClient = getApiClient(endpoint, apiClientsByEndpoint);
+      const sendStartedAt = Date.now();
 
       try {
-        await apiClient.send(
-          new PostToConnectionCommand({
-            ConnectionId: item.connectionId,
-            Data: payloadBytes,
-          }),
-          {
-            abortSignal: abortController.signal,
-          }
-        );
-      } finally {
-        clearTimeout(abortTimer);
+        const abortController = new AbortController();
+        const abortTimer = setTimeout(() => abortController.abort(), wsSendTimeoutMs);
+
+        try {
+          await apiClient.send(
+            new PostToConnectionCommand({
+              ConnectionId: item.connectionId,
+              Data: payloadBytes,
+            }),
+            {
+              abortSignal: abortController.signal,
+            }
+          );
+        } finally {
+          clearTimeout(abortTimer);
+        }
+
+        console.log('ws-send delivered', {
+          appId: event?.app_id,
+          clientId: item.clientId,
+          connectionId: item.connectionId,
+          endpoint,
+          wsSendTimeoutMs,
+          sendDurationMs: Date.now() - sendStartedAt,
+        });
+
+        return {
+          delivered: true,
+          goneConnectionId: null as string | null,
+        };
+      } catch (error) {
+        const isGone = error instanceof GoneException;
+
+        const isTimeoutAbort =
+          error instanceof Error &&
+          (error.name === 'AbortError' || error.message.toLowerCase().includes('abort'));
+
+        const metadata =
+          error && typeof error === 'object' && '$metadata' in error
+            ? (error as { $metadata?: unknown }).$metadata
+            : undefined;
+
+        console.error('ws-send failed', {
+          appId: event?.app_id,
+          clientId: item.clientId,
+          connectionId: item.connectionId,
+          endpoint,
+          wsSendTimeoutMs,
+          sendDurationMs: Date.now() - sendStartedAt,
+          isGone,
+          isTimeoutAbort,
+          metadata,
+          error,
+        });
+
+        return {
+          delivered: false,
+          goneConnectionId: isGone ? item.connectionId : null,
+        };
       }
+    })
+  );
 
-      console.log('ws-send delivered', {
-        appId: event?.app_id,
-        clientId: item.clientId,
-        connectionId: item.connectionId,
-        endpoint,
-        wsSendTimeoutMs,
-        sendDurationMs: Date.now() - sendStartedAt,
-      });
-
-      deliveredCount += 1;
-    } catch (error) {
-      failedCount += 1;
-
-      const isGone = error instanceof GoneException;
-      if (isGone) {
-        goneConnectionIds.push(item.connectionId);
-      }
-
-      const isTimeoutAbort =
-        error instanceof Error &&
-        (error.name === 'AbortError' || error.message.toLowerCase().includes('abort'));
-
-      const metadata =
-        error && typeof error === 'object' && '$metadata' in error
-          ? (error as { $metadata?: unknown }).$metadata
-          : undefined;
-
-      console.error('ws-send failed', {
-        appId: event?.app_id,
-        clientId: item.clientId,
-        connectionId: item.connectionId,
-        endpoint,
-        wsSendTimeoutMs,
-        sendDurationMs: Date.now() - sendStartedAt,
-        isGone,
-        isTimeoutAbort,
-        metadata,
-        error,
-      });
-    }
-  }
+  const deliveredCount = sendResults.filter((result) => result.delivered).length;
+  const failedCount = sendResults.length - deliveredCount;
+  const goneConnectionIds = sendResults
+    .map((result) => result.goneConnectionId)
+    .filter((connectionId): connectionId is string => connectionId !== null);
 
   return {
     deliveredCount,

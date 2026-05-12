@@ -714,6 +714,19 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     // -------------------------
+    // SNS Topic (SPaT fanout)
+    // -------------------------
+    const spatTopic = new sns.Topic(this, 'MsightSpatTopic', {
+      topicName: 'msight-spat-topic',
+      displayName: 'MSight SPaT Data Fanout',
+    });
+
+    new cdk.CfnOutput(this, 'SpatTopicArn', {
+      value: spatTopic.topicArn,
+      description: 'SNS topic ARN for SPaT data fanout.',
+    });
+
+    // -------------------------
     // Sensor SNS consumer Lambda (Python)
     // -------------------------
 
