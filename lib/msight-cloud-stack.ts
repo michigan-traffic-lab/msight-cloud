@@ -442,6 +442,26 @@ export class MsightCloudStack extends cdk.Stack {
 
     cluster.secret!.grantRead(latencyLambda);
 
+    // -------------------------
+    // Maps Lambda
+    // -------------------------
+    const mapsLambda = new NodejsFunction(this, 'MapsLambda', {
+      ...commonLambdaProps,
+      entry: path.join(__dirname, '../src/functions/maps-api/handler.ts'),
+      handler: 'handler',
+      environment: {
+        API_VERSION: 'v1',
+        SERVICE_NAME: 'maps-api',
+        BUILD_ID: buildId,
+        DB_HOST: proxy.endpoint,
+        DB_PORT: '5432',
+        DB_NAME: 'msight',
+        DB_SECRET_ARN: cluster.secret!.secretArn,
+      },
+    });
+
+    cluster.secret!.grantRead(mapsLambda);
+
     let cacheDebugLambda: NodejsFunction | undefined;
     if (isDebugMode) {
       cacheDebugLambda = new NodejsFunction(this, 'CacheDebugLambda', {
@@ -486,6 +506,11 @@ export class MsightCloudStack extends cdk.Stack {
     const sensorIntegration = new HttpLambdaIntegration(
       'SensorIntegration',
       sensorLambda
+    );
+
+    const mapsIntegration = new HttpLambdaIntegration(
+      'MapsIntegration',
+      mapsLambda
     );
 
     const wsConnectIntegration = new WebSocketLambdaIntegration(
@@ -564,6 +589,20 @@ export class MsightCloudStack extends cdk.Stack {
       path: '/v1/clients/notify/radius/health',
       methods: [apigwv2.HttpMethod.GET],
       integration: radiusBroadcastIntegration,
+    });
+
+    // /v1/maps/search must be registered before /v1/maps/{name} so the static
+    // path takes precedence in API Gateway route matching.
+    httpApi.addRoutes({
+      path: '/v1/maps/search',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: mapsIntegration,
+    });
+
+    httpApi.addRoutes({
+      path: '/v1/maps/{name}',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: mapsIntegration,
     });
 
     // -------------------------

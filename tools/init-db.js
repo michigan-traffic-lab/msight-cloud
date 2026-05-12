@@ -73,6 +73,10 @@ async function main() {
   // One statement per call. This is the safe pattern for Aurora Serverless v2.
   const statements = [
     {
+      label: 'Enable PostGIS extension',
+      sql: `CREATE EXTENSION IF NOT EXISTS postgis;`,
+    },
+    {
       label: 'Create apps table',
       sql: `
         CREATE TABLE IF NOT EXISTS apps (
@@ -82,6 +86,33 @@ async function main() {
           created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+      `,
+    },
+    {
+      label: 'Create maps table',
+      sql: `
+        CREATE TABLE IF NOT EXISTS maps (
+          id         BIGSERIAL    PRIMARY KEY,
+          name       TEXT         NOT NULL UNIQUE,
+          data       JSONB        NOT NULL,
+          center     GEOGRAPHY(Point, 4326) NOT NULL,
+          created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+      `,
+    },
+    {
+      label: 'Create maps center spatial index',
+      sql: `
+        CREATE INDEX IF NOT EXISTS maps_center_idx
+          ON maps USING GIST (center);
+      `,
+    },
+    {
+      label: 'Create maps name index',
+      sql: `
+        CREATE INDEX IF NOT EXISTS maps_name_idx
+          ON maps (name);
       `,
     },
   ];
@@ -106,6 +137,42 @@ async function main() {
 
   const appsColumnCount = appsResult.records ? appsResult.records.length : 0;
   console.log(`  apps column count = ${appsColumnCount}`);
+
+  console.log('\n==> Verify maps table');
+  const mapsResult = await client.send(
+    new ExecuteStatementCommand({
+      ...baseParams,
+      sql: `
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_name = 'maps'
+        ORDER BY ordinal_position;
+      `,
+      includeResultMetadata: true,
+    })
+  );
+
+  const mapsColumnCount = mapsResult.records ? mapsResult.records.length : 0;
+  console.log(`  maps column count = ${mapsColumnCount}`);
+
+  console.log('\n==> Verify maps indexes');
+  const mapsIndexResult = await client.send(
+    new ExecuteStatementCommand({
+      ...baseParams,
+      sql: `
+        SELECT indexname
+        FROM pg_indexes
+        WHERE tablename = 'maps'
+        ORDER BY indexname;
+      `,
+      includeResultMetadata: true,
+    })
+  );
+
+  const mapsIndexNames = (mapsIndexResult.records ?? []).map(
+    (row) => row[0].stringValue
+  );
+  console.log(`  maps indexes = ${mapsIndexNames.join(', ')}`);
 
   console.log('\nDatabase initialization completed successfully.');
 }

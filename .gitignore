@@ -3,6 +3,7 @@
 !init-db.js
 !test-client.js
 !cache_debug.js
+!insert-map.js
 *.d.ts
 node_modules
 
