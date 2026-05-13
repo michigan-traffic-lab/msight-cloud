@@ -5,34 +5,30 @@ import {
 } from '@aws-sdk/client-apigatewaymanagementapi';
 import { sendValkeyArrayCommand } from '../../shared/valkey-client.js';
 
-const DEFAULT_ZONE_ID = 'zone01';
+const ZONE_ID = 'zone01';
 const DEFAULT_SCAN_BATCH = 100;
-
-function getZoneId(): string {
-  return process.env.LOCATION_ZONE_ID ?? DEFAULT_ZONE_ID;
-}
 
 // ---- key builders --------------------------------------------------------
 
 function buildExpiresClientsPattern(): string {
   // Matches keys like msight:zone01:<app_id>:expires:clients
-  return `msight:${getZoneId()}:*:expires:clients`;
+  return `msight:${ZONE_ID}:*:expires:clients`;
 }
 
 function buildClientKey(appId: string, clientId: string): string {
-  return `msight:${getZoneId()}:${appId}:client:${clientId}`;
+  return `msight:${ZONE_ID}:${appId}:client:${clientId}`;
 }
 
 function buildGeoClientsKey(appId: string): string {
-  return `msight:${getZoneId()}:${appId}:geo:clients`;
+  return `msight:${ZONE_ID}:${appId}:geo:clients`;
 }
 
 function buildExpirationKey(appId: string): string {
-  return `msight:${getZoneId()}:${appId}:expires:clients`;
+  return `msight:${ZONE_ID}:${appId}:expires:clients`;
 }
 
 function buildWsConnectionLookupKey(connectionId: string): string {
-  return `msight:${getZoneId()}:ws:connection:${connectionId}`;
+  return `msight:${ZONE_ID}:ws:connection:${connectionId}`;
 }
 
 type ExpirationEntry = {
@@ -46,7 +42,7 @@ type ExpirationEntry = {
  * Extract app_id from a key of the form `msight:{zone}:{app_id}:expires:clients`.
  */
 function parseAppIdFromExpiresKey(key: string): string | null {
-  const zone = getZoneId();
+  const zone = ZONE_ID;
   const prefix = `msight:${zone}:`;
   const suffix = ':expires:clients';
   if (!key.startsWith(prefix) || !key.endsWith(suffix)) {

@@ -11,7 +11,7 @@ import {
 } from '../../shared/schemas/location';
 import { sendValkeyArrayCommand } from '../../shared/valkey-client.js';
 
-const DEFAULT_ZONE_ID = 'zone01';
+const ZONE_ID = 'zone01';
 const DEFAULT_LOCATION_TTL_SECONDS = 30 * 60;
 
 function jsonResponse(
@@ -27,24 +27,20 @@ function jsonResponse(
   };
 }
 
-function getZoneId(): string {
-  return process.env.LOCATION_ZONE_ID ?? DEFAULT_ZONE_ID;
-}
-
 function getLocationTtlSeconds(): number {
   return Number(process.env.LOCATION_TTL_SECONDS ?? String(DEFAULT_LOCATION_TTL_SECONDS));
 }
 
 function buildGeoClientsKey(appId: string): string {
-  return `msight:${getZoneId()}:${appId}:geo:clients`;
+  return `msight:${ZONE_ID}:${appId}:geo:clients`;
 }
 
 function buildClientKey(appId: string, clientId: string): string {
-  return `msight:${getZoneId()}:${appId}:client:${clientId}`;
+  return `msight:${ZONE_ID}:${appId}:client:${clientId}`;
 }
 
 function buildExpirationKey(appId: string): string {
-  return `msight:${getZoneId()}:${appId}:expires:clients`;
+  return `msight:${ZONE_ID}:${appId}:expires:clients`;
 }
 
 function buildClientHashFields(
@@ -57,7 +53,7 @@ function buildClientHashFields(
   return [
     'app_id', request.app_id,
     'client_id', request.client_id,
-    'zone_id', getZoneId(),
+    'zone_id', ZONE_ID,
     'timestamp', request.timestamp,
     'expires_at', expiresAtIso,
     'expires_at_epoch_ms', expiresAtEpochMs,
@@ -94,7 +90,7 @@ async function upsertClientLocation(request: LocationUpdateRequest): Promise<voi
     cacheHost: process.env.CACHE_HOST,
     appId: request.app_id,
     clientId: request.client_id,
-    zoneId: getZoneId(),
+    zoneId: ZONE_ID,
     geoClientsKey,
     clientKey,
     expirationKey,

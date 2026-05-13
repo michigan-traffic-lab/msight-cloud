@@ -11,7 +11,7 @@ import {
 } from '../../shared/schemas/radius-broadcast';
 import { HealthResponseSchema } from '../../shared/schemas/location';
 
-const DEFAULT_ZONE_ID = 'zone01';
+const ZONE_ID = 'zone01';
 const DEFAULT_LIMIT = 500;
 const lambdaClient = new LambdaClient({});
 
@@ -28,16 +28,12 @@ function jsonResponse(
   };
 }
 
-function getZoneId(): string {
-  return process.env.LOCATION_ZONE_ID ?? DEFAULT_ZONE_ID;
-}
-
 function buildGeoClientsKey(appId: string): string {
-  return `msight:${getZoneId()}:${appId}:geo:clients`;
+  return `msight:${ZONE_ID}:${appId}:geo:clients`;
 }
 
 function buildClientKey(appId: string, clientId: string): string {
-  return `msight:${getZoneId()}:${appId}:client:${clientId}`;
+  return `msight:${ZONE_ID}:${appId}:client:${clientId}`;
 }
 
 function parseClientIds(response: unknown): string[] {

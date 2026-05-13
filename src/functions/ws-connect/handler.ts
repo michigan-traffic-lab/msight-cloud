@@ -5,18 +5,14 @@ import type {
 import { DeleteConnectionCommand, ApiGatewayManagementApiClient } from '@aws-sdk/client-apigatewaymanagementapi';
 import { sendValkeyArrayCommand } from '../../shared/valkey-client.js';
 
-const DEFAULT_ZONE_ID = 'zone01';
-
-function getZoneId(): string {
-  return process.env.LOCATION_ZONE_ID ?? DEFAULT_ZONE_ID;
-}
+const ZONE_ID = 'zone01';
 
 function buildClientKey(appId: string, clientId: string): string {
-  return `msight:${getZoneId()}:${appId}:client:${clientId}`;
+  return `msight:${ZONE_ID}:${appId}:client:${clientId}`;
 }
 
 function buildWsConnectionLookupKey(connectionId: string): string {
-  return `msight:${getZoneId()}:ws:connection:${connectionId}`;
+  return `msight:${ZONE_ID}:ws:connection:${connectionId}`;
 }
 
 type ExistingWsConnection = {

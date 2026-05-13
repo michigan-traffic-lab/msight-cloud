@@ -328,7 +328,6 @@ export class MsightCloudStack extends cdk.Stack {
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
         CACHE_TLS_ENABLED: 'true',
         LOCATION_TTL_SECONDS: '1800',
-        LOCATION_ZONE_ID: 'zone01',
       },
     });
 
@@ -343,7 +342,6 @@ export class MsightCloudStack extends cdk.Stack {
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
         CACHE_TLS_ENABLED: 'true',
-        LOCATION_ZONE_ID: 'zone01',
       },
     });
 
@@ -358,7 +356,6 @@ export class MsightCloudStack extends cdk.Stack {
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
         CACHE_TLS_ENABLED: 'true',
-        LOCATION_ZONE_ID: 'zone01',
       },
     });
 
@@ -374,7 +371,6 @@ export class MsightCloudStack extends cdk.Stack {
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
         CACHE_TLS_ENABLED: 'true',
-        LOCATION_ZONE_ID: 'zone01',
       },
     });
 
@@ -689,7 +685,6 @@ export class MsightCloudStack extends cdk.Stack {
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
         CACHE_TLS_ENABLED: 'true',
-        LOCATION_ZONE_ID: 'zone01',
       },
     });
 
