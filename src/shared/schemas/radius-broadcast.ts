@@ -22,6 +22,12 @@ export const RadiusBroadcastRequestSchema = z
       example: 500,
       description: 'Maximum number of nearby clients to evaluate.',
     }),
+    event_id: z.string().min(1).max(128).optional().openapi({
+      example: 'evt-20260514-abc123',
+      description:
+        'Optional caller-supplied event identifier. Auto-generated (UUID v4) when omitted. ' +
+        'The same event_id may be broadcast multiple times; clients decide how to handle duplicates.',
+    }),
     message: z.unknown().openapi({
       description: 'Arbitrary client-defined message payload sent over websocket.',
       example: { type: 'alert', title: 'Hello from control plane' },
@@ -33,6 +39,7 @@ export const RadiusBroadcastResponseSchema = z
   .object({
     status: z.enum(['ok']).openapi({ example: 'ok' }),
     app_id: z.string().openapi({ example: 'msight-internal-testing-app' }),
+    event_id: z.string().openapi({ example: 'evt-20260514-abc123' }),
     radius_m: z.number().openapi({ example: 1000 }),
     nearby_client_count: z.number().int().openapi({ example: 12 }),
     websocket_candidate_count: z.number().int().openapi({ example: 8 }),

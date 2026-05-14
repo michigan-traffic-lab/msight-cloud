@@ -144,23 +144,53 @@ def _broadcast_one(app_id: str, ws_message: dict, ref_pos: dict) -> dict:
             "http": {"method": "POST", "path": "/v1/clients/notify/radius"},
         },
     }
+    print(json.dumps({
+        "event": "broadcast_invoke",
+        "app_id": app_id,
+        "lat": ref_pos["lat"],
+        "lon": ref_pos["long"],
+        "radius_m": SDSM_BROADCAST_RADIUS_M,
+        "sensor_name": ws_message.get("sensor_name"),
+        "capture_timestamp": ws_message.get("capture_timestamp"),
+    }))
     resp = _get_lambda_client().invoke(
         FunctionName=RADIUS_BROADCAST_LAMBDA_NAME,
         InvocationType="RequestResponse",
         Payload=json.dumps(apigw_event).encode("utf-8"),
     )
+    raw_payload = resp["Payload"].read().decode("utf-8")
+
     if resp.get("FunctionError"):
-        err = resp["Payload"].read().decode("utf-8")
-        raise RuntimeError(f"radiusBroadcastLambda error: {err}")
-    result = json.loads(resp["Payload"].read().decode("utf-8"))
+        raise RuntimeError(f"radiusBroadcastLambda function error: {raw_payload}")
+
+    result = json.loads(raw_payload)
+    status_code = result.get("statusCode", 0)
     body = json.loads(result.get("body", "{}"))
+
+    print(json.dumps({
+        "event": "broadcast_result",
+        "app_id": app_id,
+        "http_status": status_code,
+        "delivered_count": body.get("delivered_count"),
+        "failed_count": body.get("failed_count"),
+        "nearby_client_count": body.get("nearby_client_count"),
+        "websocket_candidate_count": body.get("websocket_candidate_count"),
+        "body": body,
+    }))
+
+    if status_code != 200:
+        raise RuntimeError(
+            f"radiusBroadcastLambda returned HTTP {status_code}: {body.get('error')} — {body.get('message')}"
+        )
+
     return {"app_id": app_id, **body}
 
 
 def _broadcast_all(app_ids: list, ws_message: dict, ref_pos: dict) -> None:
     if not app_ids:
-        print("No apps with receive_sdsm=true 鈥?skipping broadcast.")
+        print(json.dumps({"event": "broadcast_skip", "reason": "no apps with receive_sdsm=true"}))
         return
+    print(json.dumps({"event": "broadcast_all_start", "app_ids": app_ids, "app_count": len(app_ids)}))
     with ThreadPoolExecutor(max_workers=len(app_ids)) as executor:
         futures = {
             executor.submit(_broadcast_one, aid, ws_message, ref_pos): aid
@@ -170,73 +200,105 @@ def _broadcast_all(app_ids: list, ws_message: dict, ref_pos: dict) -> None:
             app_id = futures[future]
             try:
                 r = future.result()
-                print(f"Broadcast app_id={app_id} delivered={r.get('delivered_count')} nearby={r.get('nearby_client_count')}")
+                print(json.dumps({
+                    "event": "broadcast_app_done",
+                    "app_id": app_id,
+                    "delivered_count": r.get("delivered_count"),
+                    "nearby_client_count": r.get("nearby_client_count"),
+                }))
             except Exception as e:
-                print(f"Broadcast failed app_id={app_id}: {e}")
+                print(json.dumps({"event": "broadcast_app_error", "app_id": app_id, "error": str(e)}))
 
 
 # ---- Lambda entry point ---------------------------------------------------
 
 def handler(event, context):
-    for record in event.get("Records", []):
+    records = event.get("Records", [])
+    print(json.dumps({"event": "handler_start", "record_count": len(records)}))
+
+    for record in records:
         sns_record  = record.get("Sns", {})
         raw_message = sns_record.get("Message", "")
+        message_id  = sns_record.get("MessageId", "unknown")
+
+        print(json.dumps({"event": "sns_record", "message_id": message_id, "raw_preview": raw_message[:200]}))
 
         try:
             msg = json.loads(raw_message)
         except Exception:
-            print(f"Could not parse SNS message as JSON: {raw_message[:200]}")
+            print(json.dumps({"event": "parse_error", "message_id": message_id, "raw": raw_message[:200]}))
             continue
 
         sensor_name    = msg.get("sensor_name", "unknown")
         capture_ts_raw = msg.get("capture_timestamp")
 
+        print(json.dumps({
+            "event": "message_fields",
+            "message_id": message_id,
+            "sensor_name": sensor_name,
+            "capture_timestamp": capture_ts_raw,
+            "device_name": msg.get("device_name"),
+            "frame_id": msg.get("frame_id"),
+            "has_data": bool(msg.get("data")),
+            "keys": list(msg.keys()),
+        }))
+
         try:
             capture_ts = float(capture_ts_raw)
         except (TypeError, ValueError):
-            print(f"sensor={sensor_name} invalid capture_timestamp={capture_ts_raw!r} 鈥?skipping")
+            print(json.dumps({"event": "invalid_timestamp", "sensor_name": sensor_name, "capture_timestamp": str(capture_ts_raw)}))
             continue
 
         # Ordering guard: drop messages that arrive out-of-order via SNS
         try:
-            if _is_stale(sensor_name, capture_ts):
-                print(f"sensor={sensor_name} stale capture_ts={capture_ts} 鈥?skipping")
+            stale = _is_stale(sensor_name, capture_ts)
+            print(json.dumps({"event": "stale_check", "sensor_name": sensor_name, "capture_ts": capture_ts, "is_stale": stale}))
+            if stale:
                 continue
         except Exception as e:
-            print(f"sensor={sensor_name} Valkey timestamp check failed: {e} 鈥?proceeding anyway")
+            print(json.dumps({"event": "stale_check_error", "sensor_name": sensor_name, "error": str(e)}))
 
         data_b64 = msg.get("data")
         if not data_b64:
+            print(json.dumps({"event": "missing_data", "sensor_name": sensor_name}))
             continue
 
         try:
             envelope = _parse_dsrc_envelope(data_b64)
         except Exception as e:
-            print(f"sensor={sensor_name} envelope decode failed: {e}")
+            print(json.dumps({"event": "envelope_decode_error", "sensor_name": sensor_name, "error": str(e)}))
             continue
 
         msg_type    = envelope.get("Type", "")
         hex_payload = envelope.get("Payload", "")
 
+        print(json.dumps({"event": "envelope_parsed", "sensor_name": sensor_name, "msg_type": msg_type, "has_payload": bool(hex_payload), "envelope_keys": list(envelope.keys())}))
+
         if msg_type != "SDSM" or not hex_payload:
-            print(f"sensor={sensor_name} unsupported type={msg_type!r} 鈥?skipping")
+            print(json.dumps({"event": "unsupported_type", "sensor_name": sensor_name, "msg_type": msg_type}))
             continue
 
         try:
             decoded = sdsm_decoder(hex_payload)
         except Exception as e:
-            print(f"sensor={sensor_name} SDSM decode failed: {e}")
+            print(json.dumps({"event": "sdsm_decode_error", "sensor_name": sensor_name, "error": str(e), "hex_preview": hex_payload[:80]}))
             continue
 
         ref_pos = decoded.get("refPos")
+        print(json.dumps({
+            "event": "sdsm_decoded",
+            "sensor_name": sensor_name,
+            "capture_ts": capture_ts,
+            "object_count": len(decoded.get("objects", [])),
+            "ref_pos": ref_pos,
+        }))
+
         if not ref_pos:
-            print(f"sensor={sensor_name} no refPos in decoded SDSM 鈥?skipping broadcast")
+            print(json.dumps({"event": "missing_ref_pos", "sensor_name": sensor_name}))
             continue
 
-        print(f"sensor={sensor_name} SDSM decoded objects={len(decoded.get('objects', []))} capture_ts={capture_ts}")
-
         if not RADIUS_BROADCAST_LAMBDA_NAME:
-            print("RADIUS_BROADCAST_LAMBDA_NAME not set — skipping broadcast")
+            print(json.dumps({"event": "broadcast_lambda_not_configured", "sensor_name": sensor_name}))
             continue
 
         ws_message = {
@@ -251,10 +313,12 @@ def handler(event, context):
 
         try:
             app_ids = _get_sdsm_app_ids()
+            print(json.dumps({"event": "sdsm_app_ids", "sensor_name": sensor_name, "app_ids": app_ids, "count": len(app_ids)}))
         except Exception as e:
-            print(f"sensor={sensor_name} failed to query apps: {e}")
+            print(json.dumps({"event": "db_query_error", "sensor_name": sensor_name, "error": str(e)}))
             continue
 
         _broadcast_all(app_ids, ws_message, ref_pos)
 
+    print(json.dumps({"event": "handler_done", "record_count": len(records)}))
     return {"statusCode": 200}

@@ -87,8 +87,8 @@ export class MsightCloudStack extends cdk.Stack {
     const hasPreferredAz = typeof preferredAz === 'string' && preferredAz.length > 0;
     const appSubnetSelection: ec2.SubnetSelection =
       hasPreferredAz
-        ? { subnetType: appSubnetType, availabilityZones: [preferredAz] }
-        : { subnetType: appSubnetType };
+        ? { subnetGroupName: 'app', availabilityZones: [preferredAz] }
+        : { subnetGroupName: 'app' };
     const multiAzAppSubnetSelection: ec2.SubnetSelection = {
       subnetType: appSubnetType,
     };
@@ -371,6 +371,7 @@ export class MsightCloudStack extends cdk.Stack {
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
         CACHE_TLS_ENABLED: 'true',
+        WS_SEND_TIMEOUT_MS: '10000',
       },
     });
 
@@ -398,8 +399,8 @@ export class MsightCloudStack extends cdk.Stack {
       },
     });
 
-    radiusBroadcastLambda.addEnvironment('WS_SEND_LAMBDA_NAME', wsSenderLambda.functionName);
-    wsSenderLambda.grantInvoke(radiusBroadcastLambda);
+    // radiusBroadcastLambda handles WS sending directly via shared ws-sender module.
+    // wsSenderLambda is kept deployed for standalone use but is no longer invoked by radius-broadcast.
 
     // -------------------------
     // System Lambda
@@ -665,6 +666,13 @@ export class MsightCloudStack extends cdk.Stack {
     );
 
     wsSenderLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['execute-api:ManageConnections'],
+        resources: [wsManageConnectionsArn],
+      })
+    );
+
+    radiusBroadcastLambda.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['execute-api:ManageConnections'],
         resources: [wsManageConnectionsArn],

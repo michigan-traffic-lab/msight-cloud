@@ -8,7 +8,9 @@
             "matchCommandLine": true
         },
         "&": true,
-        ".\\node_modules\\.bin\\tsc.cmd": true
+        ".\\node_modules\\.bin\\tsc.cmd": true,
+        "ConvertFrom-Json": true,
+        "ForEach-Object": true
     },
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda"

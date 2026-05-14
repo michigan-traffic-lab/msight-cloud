@@ -7,6 +7,7 @@ Update the configuration values below and run the script directly.
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -28,7 +29,7 @@ ORIGIN_LON = -83.704366
 
 RADIUS_M = 1000
 LIMIT = 500
-REQUEST_TIMEOUT_SECONDS = 10
+REQUEST_TIMEOUT_SECONDS = 30
 WARNING_MESSAGE_TEXT = "Pedestrian crossing ahead"
 
 
@@ -44,9 +45,9 @@ def build_warning_message(timestamp: str) -> dict[str, Any]:
     }
 
 
-def build_payload() -> dict[str, Any]:
+def build_payload(event_id: str | None = None) -> dict[str, Any]:
     server_timestamp = iso_timestamp()
-    return {
+    payload: dict[str, Any] = {
         "app_id": APP_ID,
         "origin": {
             "lat": ORIGIN_LAT,
@@ -57,6 +58,9 @@ def build_payload() -> dict[str, Any]:
         "server_timestamp": server_timestamp,
         "message": build_warning_message(server_timestamp),
     }
+    if event_id is not None:
+        payload["event_id"] = event_id
+    return payload
 
 
 def print_request_timing(round_trip_ms: float, *, stream: Any = sys.stdout) -> None:
@@ -71,8 +75,8 @@ def print_request_timing(round_trip_ms: float, *, stream: Any = sys.stdout) -> N
     )
 
 
-def send_radius_broadcast() -> int:
-    payload = build_payload()
+def send_radius_broadcast(event_id: str | None = None) -> int:
+    payload = build_payload(event_id)
     encoded_body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         API_URL,
@@ -112,4 +116,7 @@ def send_radius_broadcast() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(send_radius_broadcast())
+    parser = argparse.ArgumentParser(description="Send a radius broadcast request")
+    parser.add_argument("--event-id", metavar="ID", help="event_id to include in the request (omit to let the server generate one)")
+    args = parser.parse_args()
+    raise SystemExit(send_radius_broadcast(args.event_id))
