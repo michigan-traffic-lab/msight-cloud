@@ -851,6 +851,41 @@ export class MsightCloudStack extends cdk.Stack {
       new snsSubscriptions.LambdaSubscription(sensorSnsConsumerLambda)
     );
 
+    // -------------------------
+    // SPaT SNS consumer Lambda (Python)
+    // -------------------------
+    const spatSnsConsumerLambda = new lambda.Function(this, 'SpatSnsConsumerLambda', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      code: lambda.Code.fromAsset(path.join(__dirname, '../src/functions/spat-sns-consumer')),
+      handler: 'handler.handler',
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      vpc,
+      vpcSubnets: appSubnetSelection,
+      securityGroups: [lambdaSg],
+      layers: [pyV2XLayer],
+      environment: {
+        SERVICE_NAME: 'spat-sns-consumer',
+        BUILD_ID: buildId,
+        RADIUS_BROADCAST_LAMBDA_NAME: radiusBroadcastLambda.functionName,
+        SPAT_BROADCAST_RADIUS_M: '500',
+        DB_HOST: proxy.endpoint,
+        DB_PORT: '5432',
+        DB_NAME: 'msight',
+        DB_SECRET_ARN: cluster.secret!.secretArn,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+      },
+    });
+
+    cluster.secret!.grantRead(spatSnsConsumerLambda);
+    radiusBroadcastLambda.grantInvoke(spatSnsConsumerLambda);
+
+    spatTopic.addSubscription(
+      new snsSubscriptions.LambdaSubscription(spatSnsConsumerLambda)
+    );
+
     if (cacheDebugLambda) {
       new cdk.CfnOutput(this, 'CacheDebugLambdaName', {
         value: cacheDebugLambda.functionName,
