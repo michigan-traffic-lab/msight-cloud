@@ -217,11 +217,9 @@ def handler(event, context):
     print(json.dumps({"event": "handler_start", "record_count": len(records)}))
 
     for record in records:
-        sns_record  = record.get("Sns", {})
-        raw_message = sns_record.get("Message", "")
-        message_id  = sns_record.get("MessageId", "unknown")
-
-        print(json.dumps({"event": "sns_record", "message_id": message_id, "raw_preview": raw_message[:200]}))
+        # Delivered via SQS FIFO (rawMessageDelivery=true): body IS the raw message payload.
+        raw_message = record.get("body", "")
+        message_id  = record.get("messageId", "unknown")
 
         try:
             msg = json.loads(raw_message)

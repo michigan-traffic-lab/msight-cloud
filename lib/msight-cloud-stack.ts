@@ -8,6 +8,8 @@ import * as rds from 'aws-cdk-lib/aws-rds';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
@@ -746,8 +748,13 @@ export class MsightCloudStack extends cdk.Stack {
     // SNS Topic (sensor fanout)
     // -------------------------
     const sensorTopic = new sns.Topic(this, 'MsightSensorTopic', {
-      topicName: 'msight-sensor-topic',
+      topicName: 'msight-sensor-topic.fifo',
       displayName: 'MSight Sensor Data Fanout',
+      fifo: true,
+      contentBasedDeduplication: true,
+      // MessageGroup scope: no regional throughput cap; deduplication scoped per group.
+      // WARNING: cannot be reverted to Topic scope once deployed.
+      fifoThroughputScope: sns.FifoThroughputScope.MESSAGE_GROUP,
     });
 
     new cdk.CfnOutput(this, 'SensorTopicArn', {
@@ -847,8 +854,24 @@ export class MsightCloudStack extends cdk.Stack {
     cluster.secret!.grantRead(sensorSnsConsumerLambda);
     radiusBroadcastLambda.grantInvoke(sensorSnsConsumerLambda);
 
+    // FIFO SNS does not support direct Lambda subscriptions.
+    // Route through an SQS FIFO queue; ordering is per MessageGroupId (set by publisher).
+    const sensorQueue = new sqs.Queue(this, 'MsightSensorQueue', {
+      queueName: 'msight-sensor-queue.fifo',
+      fifo: true,
+      contentBasedDeduplication: true,
+      visibilityTimeout: cdk.Duration.seconds(60),
+      // Required pair: deduplicationScope must be MESSAGE_GROUP when using PER_MESSAGE_GROUP_ID throughput.
+      deduplicationScope: sqs.DeduplicationScope.MESSAGE_GROUP,
+      fifoThroughputLimit: sqs.FifoThroughputLimit.PER_MESSAGE_GROUP_ID,
+    });
+
     sensorTopic.addSubscription(
-      new snsSubscriptions.LambdaSubscription(sensorSnsConsumerLambda)
+      new snsSubscriptions.SqsSubscription(sensorQueue, { rawMessageDelivery: true })
+    );
+
+    sensorSnsConsumerLambda.addEventSource(
+      new SqsEventSource(sensorQueue, { batchSize: 10, reportBatchItemFailures: true })
     );
 
     // -------------------------
