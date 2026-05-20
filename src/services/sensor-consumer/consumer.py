@@ -8,6 +8,7 @@ and polls its own SQS queue. This gives:
   - Ordered processing guaranteed by SQS FIFO within the sensor's group
 """
 
+import asyncio
 import base64
 import json
 import os
@@ -213,10 +214,16 @@ def _broadcast_pending() -> None:
         'sdsm':               decoded,
     }
 
-    for app_id, clients in clients_by_app.items():
-        if not clients:
-            continue
-        result = broadcast_to_clients(r, app_id, clients, ws_message, AWS_REGION)
+    active = [(aid, cls) for aid, cls in clients_by_app.items() if cls]
+
+    async def _run():
+        return await asyncio.gather(*[
+            broadcast_to_clients(r, aid, cls, ws_message, AWS_REGION)
+            for aid, cls in active
+        ])
+
+    results = asyncio.run(_run())
+    for (app_id, _), result in zip(active, results):
         print(json.dumps({
             'event': 'broadcast_done',
             'app_id': app_id,

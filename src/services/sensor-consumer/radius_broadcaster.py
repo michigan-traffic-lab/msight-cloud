@@ -14,9 +14,10 @@ Keeping both operations separate lets the caller do an early-exit before
 any state-mutating work (stale-check write) when there are no nearby clients.
 """
 
+import asyncio
 import json
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -168,7 +169,7 @@ def _send_one(
 
 # ---- public: broadcast to pre-fetched client list ------------------------
 
-def broadcast_to_clients(
+async def broadcast_to_clients(
     redis_client,
     app_id:     str,
     clients:    list[WsClient],
@@ -195,32 +196,27 @@ def broadcast_to_clients(
         "server_timestamp": datetime.now(timezone.utc).isoformat(),
     }).encode("utf-8")
 
-    # boto3 clients are NOT thread-safe — each thread gets its own map.
     result = BroadcastResult()
     gone_items: list[WsClient] = []
-
-    # Build a connection_id -> WsClient map for gone cleanup.
     by_connection_id = {c.connection_id: c for c in clients}
 
+    loop = asyncio.get_running_loop()
+    # One thread per client so no client's timeout can queue another.
+    apigw_clients: dict = {}
     with ThreadPoolExecutor(max_workers=min(len(clients), 20)) as executor:
-        apigw_clients: dict = {}  # shared within this thread pool (single-threaded dict writes are safe here because we build clients lazily in _send_one and ThreadPoolExecutor dispatches one call per item)
-        # NOTE: boto3 clients are NOT thread-safe for concurrent calls on the
-        # SAME client object. We serialise per-endpoint by creating one client
-        # per endpoint inside _send_one; the dict lookup/insert is safe because
-        # CPython's GIL protects dict operations.
-        futures = {
-            executor.submit(_send_one, apigw_clients, item, payload_bytes, aws_region): item
+        send_results = await asyncio.gather(*[
+            loop.run_in_executor(executor, _send_one, apigw_clients, item, payload_bytes, aws_region)
             for item in clients
-        }
-        for future in as_completed(futures):
-            _conn_id, delivered, gone = future.result()
-            if delivered:
-                result.delivered_count += 1
-            elif gone:
-                result.gone_count += 1
-                gone_items.append(by_connection_id[_conn_id])
-            else:
-                result.failed_count += 1
+        ])
+
+    for _conn_id, delivered, gone in send_results:
+        if delivered:
+            result.delivered_count += 1
+        elif gone:
+            result.gone_count += 1
+            gone_items.append(by_connection_id[_conn_id])
+        else:
+            result.failed_count += 1
 
     # Clean up stale Valkey entries for gone connections.
     for item in gone_items:

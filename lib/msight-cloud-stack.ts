@@ -927,6 +927,7 @@ export class MsightCloudStack extends cdk.Stack {
         securityGroups: [lambdaSg],
         assignPublicIp: false,
         circuitBreaker: { rollback: true },
+        enableExecuteCommand: true,
       });
     }
 
