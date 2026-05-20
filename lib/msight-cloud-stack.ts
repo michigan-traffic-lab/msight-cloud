@@ -9,7 +9,8 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
-import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
@@ -827,52 +828,107 @@ export class MsightCloudStack extends cdk.Stack {
       description: 'pyv2xlib + pycrate + psycopg2 + redis — V2X ASN.1 decoding, PostgreSQL, and Valkey access',
     });
 
-    const sensorSnsConsumerLambda = new lambda.Function(this, 'SensorSnsConsumerLambda', {
-      runtime: lambda.Runtime.PYTHON_3_12,
-      code: lambda.Code.fromAsset(path.join(__dirname, '../src/functions/sensor-sns-consumer')),
-      handler: 'handler.handler',
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 256,
+    // -------------------------
+    // Sensor name list — replace with dynamic provisioner once validated
+    // -------------------------
+    const sensorNameList = [
+      'derq_huronPkwy_plymouth',
+      'ouster_huronPkwy_plymouth',
+    ];
+
+    // -------------------------
+    // ECS Cluster + sensor consumer services
+    // -------------------------
+    const ecsCluster = new ecs.Cluster(this, 'MsightEcsCluster', {
       vpc,
-      vpcSubnets: appSubnetSelection,
-      securityGroups: [lambdaSg],
-      layers: [pyV2XLayer],
-      environment: {
-        SERVICE_NAME: 'sensor-sns-consumer',
-        BUILD_ID: buildId,
-        RADIUS_BROADCAST_LAMBDA_NAME: radiusBroadcastLambda.functionName,
-        DB_HOST: proxy.endpoint,
-        DB_PORT: '5432',
-        DB_NAME: 'msight',
-        DB_SECRET_ARN: cluster.secret!.secretArn,
-        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
-        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
-        CACHE_TLS_ENABLED: 'true',
-      },
+      clusterName: 'msight-cluster',
+      containerInsights: true,
     });
 
-    cluster.secret!.grantRead(sensorSnsConsumerLambda);
-    radiusBroadcastLambda.grantInvoke(sensorSnsConsumerLambda);
-
-    // FIFO SNS does not support direct Lambda subscriptions.
-    // Route through an SQS FIFO queue; ordering is per MessageGroupId (set by publisher).
-    const sensorQueue = new sqs.Queue(this, 'MsightSensorQueue', {
-      queueName: 'msight-sensor-queue.fifo',
-      fifo: true,
-      contentBasedDeduplication: true,
-      visibilityTimeout: cdk.Duration.seconds(60),
-      // Required pair: deduplicationScope must be MESSAGE_GROUP when using PER_MESSAGE_GROUP_ID throughput.
-      deduplicationScope: sqs.DeduplicationScope.MESSAGE_GROUP,
-      fifoThroughputLimit: sqs.FifoThroughputLimit.PER_MESSAGE_GROUP_ID,
+    // Task role — permissions for the running container (SQS, Secrets Manager, WS management)
+    const sensorConsumerTaskRole = new iam.Role(this, 'SensorConsumerTaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      roleName: 'msight-sensor-consumer-task-role',
     });
+    sensorConsumerTaskRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['execute-api:ManageConnections'],
+      resources: [wsManageConnectionsArn],
+    }));
+    cluster.secret!.grantRead(sensorConsumerTaskRole);
 
-    sensorTopic.addSubscription(
-      new snsSubscriptions.SqsSubscription(sensorQueue, { rawMessageDelivery: true })
+    // Container image — built from repo root so src/vendor is accessible
+    const sensorConsumerImage = ecs.ContainerImage.fromAsset(
+      path.join(__dirname, '..'),
+      { file: 'src/services/sensor-consumer/Dockerfile' }
     );
 
-    sensorSnsConsumerLambda.addEventSource(
-      new SqsEventSource(sensorQueue, { batchSize: 10, reportBatchItemFailures: true })
-    );
+    // One SQS FIFO queue + SNS subscription + ECS Fargate service per sensor.
+    // NOTE: the publisher must include sensor_name as a SNS MessageAttribute for filtering to work.
+    for (const sensorName of sensorNameList) {
+      const safeName = sensorName.replace(/_/g, '-').toLowerCase();
+
+      const sensorQueue = new sqs.Queue(this, `SensorQueue-${sensorName}`, {
+        queueName: `msight-sensor-${safeName}.fifo`,
+        fifo: true,
+        contentBasedDeduplication: true,
+        visibilityTimeout: cdk.Duration.seconds(60),
+        deduplicationScope: sqs.DeduplicationScope.MESSAGE_GROUP,
+        fifoThroughputLimit: sqs.FifoThroughputLimit.PER_MESSAGE_GROUP_ID,
+      });
+
+      sensorTopic.addSubscription(
+        new snsSubscriptions.SqsSubscription(sensorQueue, {
+          rawMessageDelivery: true,
+          filterPolicy: {
+            sensor_name: sns.SubscriptionFilter.stringFilter({ allowlist: [sensorName] }),
+          },
+        })
+      );
+
+      // Grant the ECS task role permission to consume this queue
+      sensorQueue.grantConsumeMessages(sensorConsumerTaskRole);
+
+      const taskDef = new ecs.FargateTaskDefinition(this, `SensorConsumerTaskDef-${sensorName}`, {
+        memoryLimitMiB: 2048,
+        cpu: 1024,
+        taskRole: sensorConsumerTaskRole,
+      });
+
+      taskDef.addContainer('consumer', {
+        image: sensorConsumerImage,
+        environment: {
+          SENSOR_NAME: sensorName,
+          QUEUE_URL: sensorQueue.queueUrl,
+          BUILD_ID: buildId,
+          DB_HOST: proxy.endpoint,
+          DB_PORT: '5432',
+          DB_NAME: 'msight',
+          DB_SECRET_ARN: cluster.secret!.secretArn,
+          CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+          CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+          CACHE_TLS_ENABLED: 'true',
+          AWS_REGION: cdk.Stack.of(this).region,
+        },
+        logging: ecs.LogDrivers.awsLogs({
+          streamPrefix: 'sensor-consumer',
+          logGroup: new logs.LogGroup(this, `SensorConsumerLogGroup-${sensorName}`, {
+            logGroupName: `/msight/sensor-consumer/${sensorName}`,
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          }),
+        }),
+      });
+
+      new ecs.FargateService(this, `SensorConsumerService-${sensorName}`, {
+        cluster: ecsCluster,
+        taskDefinition: taskDef,
+        desiredCount: 1,
+        vpcSubnets: appSubnetSelection,
+        securityGroups: [lambdaSg],
+        assignPublicIp: false,
+        circuitBreaker: { rollback: true },
+      });
+    }
 
     // -------------------------
     // SPaT SNS consumer Lambda (Python)

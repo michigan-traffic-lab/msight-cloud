@@ -1,0 +1,13 @@
+node_modules
+.layer-build
+cdk.out
+cdk.out.debug
+cdk.out.ws-sender
+.git
+*.ts
+!src/**/*.py
+bin
+lib
+test
+tools
+docs
