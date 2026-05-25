@@ -248,6 +248,15 @@ def process_message(body: str) -> None:
         print(json.dumps({'event': 'parse_error', 'sensor_name': SENSOR_NAME, 'error': str(e)}))
         return  # malformed — don't retry
 
+    # print(json.dumps({
+    #     'event': 'message_received',
+    #     'sensor_name': SENSOR_NAME,
+    #     'capture_timestamp': msg.get('capture_timestamp'),
+    #     'device_name': msg.get('device_name'),
+    #     'has_data': bool(msg.get('data')),
+    #     'raw_preview': body[:200],
+    # }))
+
     capture_ts_raw = msg.get('capture_timestamp')
     try:
         capture_ts = float(capture_ts_raw)
