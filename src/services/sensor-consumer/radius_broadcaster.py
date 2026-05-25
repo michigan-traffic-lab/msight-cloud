@@ -29,6 +29,12 @@ from botocore.exceptions import ClientError
 
 _ZONE_ID       = "zone01"
 _DEFAULT_LIMIT = 500
+MAX_WORKERS     = 20  # for ThreadPoolExecutor in broadcast_to_clients()
+
+# Module-level boto3 client cache — HTTP connections are kept alive and reused
+# across consecutive broadcast cycles, matching TypeScript WsSender behaviour.
+# endpoint (str) -> boto3 management api client
+_apigw_clients: dict = {}
 
 # ---- key builders --------------------------------------------------------
 
@@ -114,22 +120,28 @@ def get_nearby_clients(
 
 # ---- internal: clear stale WS entry in Valkey ----------------------------
 
+# Lua script: atomically check-and-delete so a reconnect that writes a new
+# ws_connection_id between the read and the HDEL cannot be silently wiped.
+_CLEAR_IF_SAME_SCRIPT = """
+local current = redis.call('HGET', KEYS[1], 'ws_connection_id')
+if current == ARGV[1] then
+    redis.call('HDEL', KEYS[1],
+        'ws_connection_id', 'ws_domain_name', 'ws_stage',
+        'ws_connected_at', 'ws_status')
+    return 1
+end
+return 0
+"""
+
 def _clear_ws_info_if_same_connection(
     redis_client,
     app_id:        str,
     client_id:     str,
     connection_id: str,
 ) -> None:
-    """Remove WS fields only if the stored connection_id still matches (mirrors TypeScript)."""
+    """Atomically remove WS fields only if the stored connection_id still matches."""
     key = _client_key(app_id, client_id)
-    active_id = redis_client.hget(key, "ws_connection_id")
-    if active_id != connection_id:
-        return
-    redis_client.hdel(
-        key,
-        "ws_connection_id", "ws_domain_name", "ws_stage",
-        "ws_connected_at", "ws_status",
-    )
+    redis_client.eval(_CLEAR_IF_SAME_SCRIPT, 1, key, connection_id)
 
 
 # ---- internal: send to one client ----------------------------------------
@@ -202,10 +214,10 @@ async def broadcast_to_clients(
 
     loop = asyncio.get_running_loop()
     # One thread per client so no client's timeout can queue another.
-    apigw_clients: dict = {}
-    with ThreadPoolExecutor(max_workers=min(len(clients), 20)) as executor:
+    # Pass the module-level cache so boto3 connections are reused across calls.
+    with ThreadPoolExecutor(max_workers=min(len(clients), MAX_WORKERS)) as executor:
         send_results = await asyncio.gather(*[
-            loop.run_in_executor(executor, _send_one, apigw_clients, item, payload_bytes, aws_region)
+            loop.run_in_executor(executor, _send_one, _apigw_clients, item, payload_bytes, aws_region)
             for item in clients
         ])
 

@@ -10,6 +10,35 @@ import {
 import { HealthResponseSchema } from '../../shared/schemas/location';
 import { radiusBroadcaster } from '../../shared/radius-broadcaster.js';
 
+// ---- direct Lambda invocation (Lambda-to-Lambda, no API GW wrapper) ------
+//
+// When invoked directly (e.g. from spat-sns-consumer) the event is just the
+// RadiusBroadcastRequest payload.  We detect this by the absence of
+// requestContext.http and return the result object directly instead of an
+// HTTP response envelope.
+
+type DirectInvocationResult = {
+  status: 'ok';
+  app_id: string;
+  event_id: string;
+  radius_m: number;
+  nearby_client_count: number;
+  websocket_candidate_count: number;
+  delivered_count: number;
+  failed_count: number;
+  server_timestamp: string;
+};
+
+function isDirectInvocation(event: unknown): boolean {
+  return (
+    typeof event === 'object' &&
+    event !== null &&
+    !('requestContext' in event)
+  );
+}
+
+// ---- HTTP helpers --------------------------------------------------------
+
 function jsonResponse(
   statusCode: number,
   body: unknown
@@ -21,13 +50,50 @@ function jsonResponse(
   };
 }
 
+// ---- Lambda entry point --------------------------------------------------
+
 export async function handler(
-  event: APIGatewayProxyEventV2
-): Promise<APIGatewayProxyStructuredResultV2> {
-  const method = event.requestContext.http.method;
-  const path = event.rawPath;
+  event: APIGatewayProxyEventV2 | Record<string, unknown>
+): Promise<APIGatewayProxyStructuredResultV2 | DirectInvocationResult> {
   const apiVersion = process.env.API_VERSION ?? 'v1';
   const serviceName = process.env.SERVICE_NAME ?? 'radius-broadcast-api';
+
+  // ---- direct invocation path ------------------------------------------
+  if (isDirectInvocation(event)) {
+    const parsedRequest = RadiusBroadcastRequestSchema.safeParse(event);
+    if (!parsedRequest.success) {
+      throw new Error(
+        `radius-broadcast-api direct invocation: invalid payload — ${JSON.stringify(parsedRequest.error.flatten())}`
+      );
+    }
+    const { app_id, origin, radius_m, message, limit, event_id } = parsedRequest.data;
+    const eventId = event_id ?? randomUUID();
+    const result = await radiusBroadcaster.broadcast({
+      appId: app_id,
+      eventId,
+      message,
+      lat: origin.lat,
+      lon: origin.lon,
+      radiusM: radius_m,
+      limit,
+    });
+    return {
+      status: 'ok',
+      app_id,
+      event_id: eventId,
+      radius_m,
+      nearby_client_count: result.nearbyClientCount,
+      websocket_candidate_count: result.websocketCandidateCount,
+      delivered_count: result.deliveredCount,
+      failed_count: result.failedCount,
+      server_timestamp: new Date().toISOString(),
+    };
+  }
+
+  // ---- HTTP API Gateway path -------------------------------------------
+  const httpEvent = event as APIGatewayProxyEventV2;
+  const method = httpEvent.requestContext.http.method;
+  const path = httpEvent.rawPath;
 
   if (method === 'GET' && path === '/v1/clients/notify/radius/health') {
     return jsonResponse(200, HealthResponseSchema.parse({
@@ -48,7 +114,7 @@ export async function handler(
 
   const parsedJson = (() => {
     try {
-      return JSON.parse(event.body ?? '{}');
+      return JSON.parse(httpEvent.body ?? '{}');
     } catch {
       return null;
     }

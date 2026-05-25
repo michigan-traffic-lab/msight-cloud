@@ -49,23 +49,20 @@ export async function handler(
 
       if (parsedMapping.app_id && parsedMapping.client_id) {
         const clientKey = buildClientKey(parsedMapping.app_id, parsedMapping.client_id);
-        const activeConnection = await sendValkeyArrayCommand([
-          'HGET',
+        // Use a Lua script for an atomic check-and-delete so a reconnect that
+        // writes a new ws_connection_id between HGET and HDEL cannot be wiped.
+        await sendValkeyArrayCommand([
+          'EVAL',
+          `local cur = redis.call('HGET', KEYS[1], 'ws_connection_id')
+ if cur == ARGV[1] then
+   redis.call('HDEL', KEYS[1], 'ws_connection_id', 'ws_domain_name', 'ws_stage', 'ws_connected_at', 'ws_status')
+   return 1
+ end
+ return 0`,
+          1,
           clientKey,
-          'ws_connection_id',
+          connectionId,
         ]);
-
-        if (String(activeConnection ?? '') === connectionId) {
-          await sendValkeyArrayCommand([
-            'HDEL',
-            clientKey,
-            'ws_connection_id',
-            'ws_domain_name',
-            'ws_stage',
-            'ws_connected_at',
-            'ws_status',
-          ]);
-        }
       }
     }
 

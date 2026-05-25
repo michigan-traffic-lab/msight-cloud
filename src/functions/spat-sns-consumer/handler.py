@@ -2,8 +2,7 @@
 
 Subscribes to the SPaT SNS topic, decodes SPAT messages, rate-limits to 2 Hz
 per sensor (500 ms minimum gap between processed messages), looks up intersection
-positions from the maps table, and broadcasts to WebSocket clients via
-radiusBroadcastLambda.
+positions from the maps table, and broadcasts to WebSocket clients by invoking radiusBroadcastLambda directly.
 """
 
 from __future__ import annotations
@@ -11,8 +10,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import boto3
 import psycopg2
 import redis
@@ -38,9 +35,9 @@ _SPAT_TS_TTL_SECONDS = 300
 _SPAT_MIN_INTERVAL_S = 0.5
 
 # ---- module-level singletons (reused across warm invocations) ------------
-_db_conn      = None
-_secret_cache = None
-_redis_client = None
+_db_conn       = None
+_secret_cache  = None
+_redis_client  = None
 _lambda_client = None
 
 
@@ -101,12 +98,7 @@ def _get_redis():
 # ---- rate limiter --------------------------------------------------------
 
 def _should_pass(sensor_name: str, capture_ts: float) -> bool:
-    """Returns True if enough time has elapsed since the last passed message.
-
-    Rejects messages where (capture_ts - last_passed_ts) < 500 ms, which
-    limits throughput to at most 2 Hz per sensor. Messages arriving out of
-    order (older than the last passed timestamp) are also dropped.
-    """
+    """Return True if at least 500 ms has elapsed since the last passed message."""
     r   = _get_redis()
     key = _SPAT_TS_KEY_PREFIX + sensor_name
     lua = """
@@ -117,8 +109,7 @@ end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
 return 1
 """
-    result = r.eval(lua, 1, key, capture_ts, _SPAT_MIN_INTERVAL_S, _SPAT_TS_TTL_SECONDS)
-    return result == 1
+    return r.eval(lua, 1, key, capture_ts, _SPAT_MIN_INTERVAL_S, _SPAT_TS_TTL_SECONDS) == 1
 
 
 # ---- database helpers ----------------------------------------------------
@@ -131,7 +122,7 @@ def _get_spat_app_ids() -> list:
 
 
 def _get_intersection_center(name: str):
-    """Returns (lat, lon) for the named map, or None if not found."""
+    """Return (lat, lon) for the named map, or None if not found."""
     conn = _get_db_conn()
     with conn.cursor() as cur:
         cur.execute(
@@ -144,19 +135,11 @@ def _get_intersection_center(name: str):
 
 # ---- WSMP / UPER extraction ---------------------------------------------
 
-_WSMP_PREFIX_LEN = 6  # fixed bytes before the BER-style WSM-Length field
+_WSMP_PREFIX_LEN = 6
 
 
 def _uper_hex_from_wsmp(data_b64: str) -> str:
-    """Strip the WSMP header and return the J2735 UPER payload as a hex string.
-
-    WSMP frame layout:
-      [6 fixed bytes] [BER-style length] [J2735 UPER payload …]
-    BER length:
-      - If byte[6] < 0x80: 1-byte length, UPER starts at offset 7
-      - Else: long-form, length spans (byte[6] & 0x7F) more bytes,
-              UPER starts at offset 6 + 1 + (byte[6] & 0x7F)
-    """
+    """Strip the WSMP header and return the J2735 UPER payload as a hex string."""
     raw = base64.b64decode(data_b64)
     idx = _WSMP_PREFIX_LEN
     first = raw[idx]
@@ -165,101 +148,6 @@ def _uper_hex_from_wsmp(data_b64: str) -> str:
 
 
 # ---- broadcast -----------------------------------------------------------
-
-def _broadcast_one(app_id: str, ws_message: dict, lat: float, lon: float) -> dict:
-    """Invoke radiusBroadcastLambda for one app."""
-    payload_body = json.dumps({
-        "app_id":   app_id,
-        "origin":   {"lat": lat, "lon": lon},
-        "radius_m": SPAT_BROADCAST_RADIUS_M,
-        "message":  ws_message,
-    })
-    apigw_event = {
-        "version": "2.0",
-        "rawPath": "/v1/clients/notify/radius",
-        "body": payload_body,
-        "requestContext": {
-            "http": {"method": "POST", "path": "/v1/clients/notify/radius"},
-        },
-    }
-    print(json.dumps({
-        "event": "broadcast_invoke",
-        "app_id": app_id,
-        "lat": lat,
-        "lon": lon,
-        "radius_m": SPAT_BROADCAST_RADIUS_M,
-        "intersection_name": ws_message.get("intersection_name"),
-        "sensor_name": ws_message.get("sensor_name"),
-        "capture_timestamp": ws_message.get("capture_timestamp"),
-    }))
-    resp = _get_lambda_client().invoke(
-        FunctionName=RADIUS_BROADCAST_LAMBDA_NAME,
-        InvocationType="RequestResponse",
-        Payload=json.dumps(apigw_event).encode("utf-8"),
-    )
-    raw_payload = resp["Payload"].read().decode("utf-8")
-
-    if resp.get("FunctionError"):
-        raise RuntimeError(f"radiusBroadcastLambda function error: {raw_payload}")
-
-    result      = json.loads(raw_payload)
-    status_code = result.get("statusCode", 0)
-    body        = json.loads(result.get("body", "{}"))
-
-    print(json.dumps({
-        "event": "broadcast_result",
-        "app_id": app_id,
-        "http_status": status_code,
-        "delivered_count": body.get("delivered_count"),
-        "failed_count": body.get("failed_count"),
-        "nearby_client_count": body.get("nearby_client_count"),
-        "websocket_candidate_count": body.get("websocket_candidate_count"),
-    }))
-
-    if status_code != 200:
-        raise RuntimeError(
-            f"radiusBroadcastLambda returned HTTP {status_code}: {body.get('error')} — {body.get('message')}"
-        )
-
-    return {"app_id": app_id, **body}
-
-
-def _broadcast_intersection(
-    intersection_name: str,
-    lat: float,
-    lon: float,
-    app_ids: list,
-    ws_message: dict,
-) -> None:
-    """Fan out one intersection's SPAT to all subscribed apps in parallel."""
-    if not app_ids:
-        print(json.dumps({"event": "broadcast_skip", "reason": "no apps with receive_spat=true"}))
-        return
-    print(json.dumps({
-        "event": "broadcast_intersection_start",
-        "intersection_name": intersection_name,
-        "lat": lat,
-        "lon": lon,
-        "app_ids": app_ids,
-        "app_count": len(app_ids),
-    }))
-    with ThreadPoolExecutor(max_workers=len(app_ids)) as executor:
-        futures = {
-            executor.submit(_broadcast_one, aid, ws_message, lat, lon): aid
-            for aid in app_ids
-        }
-        for future in as_completed(futures):
-            app_id = futures[future]
-            try:
-                r = future.result()
-                print(json.dumps({
-                    "event": "broadcast_app_done",
-                    "app_id": app_id,
-                    "delivered_count": r.get("delivered_count"),
-                    "nearby_client_count": r.get("nearby_client_count"),
-                }))
-            except Exception as e:
-                print(json.dumps({"event": "broadcast_app_error", "app_id": app_id, "error": str(e)}))
 
 
 # ---- Lambda entry point --------------------------------------------------
@@ -378,6 +266,31 @@ def handler(event, context):
                 "spat":               intersection,
             }
 
-            _broadcast_intersection(intersection_name, lat, lon, app_ids, ws_message)
+            for app_id in app_ids:
+                try:
+                    payload = {
+                        "app_id":   app_id,
+                        "origin":   {"lat": lat, "lon": lon},
+                        "radius_m": SPAT_BROADCAST_RADIUS_M,
+                        "message":  ws_message,
+                    }
+                    resp = _get_lambda_client().invoke(
+                        FunctionName=RADIUS_BROADCAST_LAMBDA_NAME,
+                        InvocationType="RequestResponse",
+                        Payload=json.dumps(payload).encode("utf-8"),
+                    )
+                    raw = resp["Payload"].read().decode("utf-8")
+                    if resp.get("FunctionError"):
+                        raise RuntimeError(raw)
+                    r = json.loads(raw)
+                    print(json.dumps({
+                        "event": "broadcast_done",
+                        "app_id": app_id,
+                        "intersection_name": intersection_name,
+                        "delivered_count": r.get("delivered_count"),
+                        "nearby_client_count": r.get("nearby_client_count"),
+                    }))
+                except Exception as e:
+                    print(json.dumps({"event": "broadcast_error", "app_id": app_id, "error": str(e)}))
 
     print(json.dumps({"event": "handler_done", "record_count": len(records)}))

@@ -152,16 +152,28 @@ async function closeWsConnection(
 
 /**
  * Clean up a single expired client:
+ *   0. Re-check ZSCORE — skip if the client sent a fresh location update since
+ *      we read the expired list (race condition guard).
  *   1. Read client hash for WS info
  *   2. Close WS connection if present
  *   3. DEL the connection lookup key
  *   4. DEL the client hash
  *   5. ZREM from geo:clients and expires:clients
  */
-async function cleanupExpiredClient(appId: string, clientId: string): Promise<void> {
+async function cleanupExpiredClient(appId: string, clientId: string, nowMs: number): Promise<void> {
   const clientKey = buildClientKey(appId, clientId);
   const geoClientsKey = buildGeoClientsKey(appId);
   const expirationKey = buildExpirationKey(appId);
+
+  // Guard against race condition: client may have sent a fresh location update
+  // (which advances their ZADD score) between the ZRANGEBYSCORE scan and now.
+  // If their score is now > nowMs, they are no longer expired — skip all
+  // destructive operations so we do not wipe valid WS fields or remove them
+  // from the geo index.
+  const currentScore = await sendValkeyArrayCommand(['ZSCORE', expirationKey, clientId]);
+  if (currentScore === null || Number(currentScore) > nowMs) {
+    return;
+  }
 
   const wsFields = await sendValkeyArrayCommand([
     'HMGET',
@@ -259,7 +271,7 @@ export async function handler(_event: ScheduledEvent, _context: Context): Promis
 
     for (const expiredEntry of expiredEntries) {
       try {
-        await cleanupExpiredClient(appId, expiredEntry.clientId);
+        await cleanupExpiredClient(appId, expiredEntry.clientId, nowMs);
         totalExpired++;
       } catch (error) {
         console.error('expiration-cleanup: failed to clean up client', {
