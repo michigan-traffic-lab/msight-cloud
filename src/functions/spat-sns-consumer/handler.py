@@ -10,6 +10,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import boto3
 import psycopg2
 import redis
@@ -266,8 +268,7 @@ def handler(event, context):
                 "spat":               intersection,
             }
 
-            for app_id in app_ids:
-                try:
+            def _invoke(app_id):
                     payload = {
                         "app_id":   app_id,
                         "origin":   {"lat": lat, "lon": lon},
@@ -282,15 +283,22 @@ def handler(event, context):
                     raw = resp["Payload"].read().decode("utf-8")
                     if resp.get("FunctionError"):
                         raise RuntimeError(raw)
-                    r = json.loads(raw)
-                    print(json.dumps({
-                        "event": "broadcast_done",
-                        "app_id": app_id,
-                        "intersection_name": intersection_name,
-                        "delivered_count": r.get("delivered_count"),
-                        "nearby_client_count": r.get("nearby_client_count"),
-                    }))
-                except Exception as e:
-                    print(json.dumps({"event": "broadcast_error", "app_id": app_id, "error": str(e)}))
+                    return json.loads(raw)
+
+            with ThreadPoolExecutor(max_workers=len(app_ids)) as executor:
+                futures = {executor.submit(_invoke, aid): aid for aid in app_ids}
+                for future in as_completed(futures):
+                    app_id = futures[future]
+                    try:
+                        r = future.result()
+                        print(json.dumps({
+                            "event": "broadcast_done",
+                            "app_id": app_id,
+                            "intersection_name": intersection_name,
+                            "delivered_count": r.get("delivered_count"),
+                            "nearby_client_count": r.get("nearby_client_count"),
+                        }))
+                    except Exception as e:
+                        print(json.dumps({"event": "broadcast_error", "app_id": app_id, "error": str(e)}))
 
     print(json.dumps({"event": "handler_done", "record_count": len(records)}))
