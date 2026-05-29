@@ -829,12 +829,10 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     // -------------------------
-    // Sensor name list — replace with dynamic provisioner once validated
+    // Sensor list — sourced from deploy.config.yaml via CDK context
     // -------------------------
-    const sensorNameList = [
-      'derq_huronPkwy_plymouth',
-      'ouster_huronPkwy_plymouth',
-    ];
+    const sensorNameList: string[] = this.node.tryGetContext('sensors') ?? [];
+    const spatBroadcastRadiusM: number = this.node.tryGetContext('spatBroadcastRadiusM') ?? 500;
 
     // -------------------------
     // ECS Cluster + sensor consumer services
@@ -948,7 +946,7 @@ export class MsightCloudStack extends cdk.Stack {
         SERVICE_NAME: 'spat-sns-consumer',
         BUILD_ID: buildId,
         RADIUS_BROADCAST_LAMBDA_NAME: radiusBroadcastLambda.functionName,
-        SPAT_BROADCAST_RADIUS_M: '500',
+        SPAT_BROADCAST_RADIUS_M: String(spatBroadcastRadiusM),
         DB_HOST: proxy.endpoint,
         DB_PORT: '5432',
         DB_NAME: 'msight',

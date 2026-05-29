@@ -1,0 +1,27 @@
+# MSight Cloud — deployment configuration
+# Copy this file to deploy.config.yaml and fill in your values.
+# deploy.config.yaml is gitignored; never commit real account IDs.
+
+# ── AWS target ────────────────────────────────────────────────────────────────
+account: "123456789012"   # 12-digit AWS account ID
+region: us-east-2
+
+# ── Network ───────────────────────────────────────────────────────────────────
+# Pin all single-AZ resources (ElastiCache, ECS tasks) to a specific AZ.
+# Leave empty ("") to let CDK pick automatically.
+preferredAz: ""
+
+# ── Feature flags ─────────────────────────────────────────────────────────────
+# debugMode: true deploys an extra cache-debug Lambda endpoint.
+debugMode: false
+
+# ── Sensor list ───────────────────────────────────────────────────────────────
+# One SQS FIFO queue + ECS Fargate service is created per entry.
+# Names must match the sensor_name attribute published to the SNS topic.
+sensors:
+  - sensor_name_1
+  - sensor_name_2
+
+# ── SPaT broadcast ────────────────────────────────────────────────────────────
+# Radius (metres) used when fanning out SPaT messages to nearby WebSocket clients.
+spatBroadcastRadiusM: 500
