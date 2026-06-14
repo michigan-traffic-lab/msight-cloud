@@ -99,12 +99,120 @@ def _get_redis():
 
 # ---- criticality filter --------------------------------------------------
 
-def is_critical(intersection: dict) -> bool:
+_CRITICAL_SPAT_PREV_KEY_PREFIX = "msight:critical_spat:prev:"
+_CRITICAL_SPAT_PREV_TTL_SECONDS = 300
+
+
+# TimeMark in J2735 is in tenths of a second; 10 units = 1 second.
+_TIMING_CHANGE_THRESHOLD_TENTHS = 10
+# Only check timing shifts when the remaining phase time is within this window.
+# Beyond this window only phase changes matter.
+_TIMING_CHECK_WINDOW_TENTHS = 1200  # 2 minutes
+
+
+def _remaining_tenths(intersection: dict, min_end_time: int) -> float | None:
+    """Return remaining phase time in tenths of a second, or None if unavailable.
+
+    moy is minute-of-year; timeStamp is milliseconds within the current minute.
+    current time in tenths from the top of the hour:
+        (moy % 60) * 600  +  timeStamp_ms / 100
+    """
+    moy = intersection.get("moy")
+    timestamp_ms = intersection.get("timeStamp")
+    if moy is None or timestamp_ms is None:
+        return None
+    current_tenths = (moy % 60) * 600 + timestamp_ms / 100
+    return min_end_time - current_tenths
+
+
+def _has_significant_change(cached: dict, incoming: dict) -> bool:
+    """Return True if a phase change or > 1-second timing shift is detected.
+
+    Timing shifts are only checked when the remaining phase time is within
+    _TIMING_CHECK_WINDOW_TENTHS (30 s). Beyond that window, only phase
+    changes are considered significant.
+    """
+    if not cached:
+        return True
+
+    cached_by_sg = {}
+    for state in cached.get("states", []):
+        sg = state.get("signalGroup")
+        sts = state.get("state-time-speed") or []
+        if sg is not None and sts:
+            cached_by_sg[sg] = sts[0]
+
+    for state in incoming.get("states", []):
+        sg = state.get("signalGroup")
+        sts = state.get("state-time-speed") or []
+        if sg is None or not sts:
+            continue
+        incoming_sts = sts[0]
+
+        cached_sts = cached_by_sg.get(sg)
+        if cached_sts is None:
+            print(json.dumps({"event": "new_signal_group", "signalGroup": sg}))
+            return True
+
+        if cached_sts.get("eventState") != incoming_sts.get("eventState"):
+            print(json.dumps({
+                "event": "phase_change",
+                "signalGroup": sg,
+                "from": cached_sts.get("eventState"),
+                "to": incoming_sts.get("eventState"),
+            }))
+            return True
+
+        cached_min = (cached_sts.get("timing") or {}).get("minEndTime")
+        incoming_min = (incoming_sts.get("timing") or {}).get("minEndTime")
+        if cached_min is not None and incoming_min is not None:
+            remaining = _remaining_tenths(incoming, incoming_min)
+            within_window = (
+                remaining is None  # can't compute — check anyway to be safe
+                or 0 < remaining <= _TIMING_CHECK_WINDOW_TENTHS
+            )
+            if within_window:
+                delta = incoming_min - cached_min
+                if abs(delta) > _TIMING_CHANGE_THRESHOLD_TENTHS:
+                    print(json.dumps({
+                        "event": "timing_shift",
+                        "signalGroup": sg,
+                        "remaining_tenths": remaining,
+                        "cached_minEndTime": cached_min,
+                        "incoming_minEndTime": incoming_min,
+                        "delta_tenths": delta,
+                    }))
+                    return True
+
+    return False
+
+
+def is_critical(sensor_name: str, intersection: dict) -> bool:
     """Return True if this intersection update should be forwarded to clients.
 
-    Stub: always returns True. Will be replaced with logic that detects
-    signal-phase changes or remaining-time deltas greater than 1 second.
+    Fetches the previous intersection state for this sensor+intersection from
+    Redis, delegates to _has_significant_change(), and on a positive result
+    writes the new state back to cache.
     """
+    intersection_name = intersection.get("name", "unknown")
+    cache_key = _CRITICAL_SPAT_PREV_KEY_PREFIX + sensor_name + ":" + intersection_name
+
+    r = _get_redis()
+    try:
+        raw = r.get(cache_key)
+        cached = json.loads(raw) if raw else {}
+    except Exception as e:
+        print(json.dumps({"event": "cache_read_error", "cache_key": cache_key, "error": str(e)}))
+        cached = {}
+
+    if not _has_significant_change(cached, intersection):
+        return False
+
+    try:
+        r.set(cache_key, json.dumps(intersection), ex=_CRITICAL_SPAT_PREV_TTL_SECONDS)
+    except Exception as e:
+        print(json.dumps({"event": "cache_write_error", "cache_key": cache_key, "error": str(e)}))
+
     return True
 
 
@@ -232,7 +340,7 @@ def handler(event, context):
                 print(json.dumps({"event": "intersection_no_name", "sensor_name": sensor_name}))
                 continue
 
-            if not is_critical(intersection):
+            if not is_critical(sensor_name, intersection):
                 print(json.dumps({"event": "not_critical", "sensor_name": sensor_name, "intersection_name": intersection_name}))
                 continue
 
