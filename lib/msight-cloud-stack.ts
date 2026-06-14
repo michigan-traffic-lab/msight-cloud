@@ -964,6 +964,43 @@ export class MsightCloudStack extends cdk.Stack {
       new snsSubscriptions.LambdaSubscription(spatSnsConsumerLambda)
     );
 
+    // -------------------------
+    // Critical SPaT SNS consumer Lambda (Python)
+    // Same as spatSnsConsumerLambda but applies an is_critical() filter before
+    // broadcasting; emits "critical_spat" WebSocket messages.
+    // -------------------------
+    const criticalSpatSnsConsumerLambda = new lambda.Function(this, 'CriticalSpatSnsConsumerLambda', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      code: lambda.Code.fromAsset(path.join(__dirname, '../src/functions/critical-spat-sns-consumer')),
+      handler: 'handler.handler',
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      vpc,
+      vpcSubnets: appSubnetSelection,
+      securityGroups: [lambdaSg],
+      layers: [pyV2XLayer],
+      environment: {
+        SERVICE_NAME: 'critical-spat-sns-consumer',
+        BUILD_ID: buildId,
+        RADIUS_BROADCAST_LAMBDA_NAME: radiusBroadcastLambda.functionName,
+        SPAT_BROADCAST_RADIUS_M: String(spatBroadcastRadiusM),
+        DB_HOST: proxy.endpoint,
+        DB_PORT: '5432',
+        DB_NAME: 'msight',
+        DB_SECRET_ARN: cluster.secret!.secretArn,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+      },
+    });
+
+    cluster.secret!.grantRead(criticalSpatSnsConsumerLambda);
+    radiusBroadcastLambda.grantInvoke(criticalSpatSnsConsumerLambda);
+
+    spatTopic.addSubscription(
+      new snsSubscriptions.LambdaSubscription(criticalSpatSnsConsumerLambda)
+    );
+
     if (cacheDebugLambda) {
       new cdk.CfnOutput(this, 'CacheDebugLambdaName', {
         value: cacheDebugLambda.functionName,

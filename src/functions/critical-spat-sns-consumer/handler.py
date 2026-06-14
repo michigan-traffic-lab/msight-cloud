@@ -1,8 +1,13 @@
-"""SPAT SNS consumer Lambda.
+"""Critical SPAT SNS consumer Lambda.
 
-Subscribes to the SPaT SNS topic, decodes SPAT messages, rate-limits to 2 Hz
-per sensor (500 ms minimum gap between processed messages), looks up intersection
-positions from the maps table, and broadcasts to WebSocket clients by invoking radiusBroadcastLambda directly.
+Subscribes to the SPaT SNS topic, decodes SPAT messages, applies an
+is_critical() filter to suppress non-significant updates, looks up intersection
+positions from the maps table, and broadcasts to WebSocket clients by invoking
+radiusBroadcastLambda directly.
+
+The is_critical() stub currently passes every message through. It will be
+replaced with logic that checks for signal-phase changes or remaining-time
+deltas > 1 s.
 """
 
 from __future__ import annotations
@@ -30,11 +35,6 @@ CACHE_HOST        = os.environ.get("CACHE_HOST", "")
 CACHE_PORT        = int(os.environ.get("CACHE_PORT", "6379"))
 CACHE_TLS_ENABLED = os.environ.get("CACHE_TLS_ENABLED", "false").lower() == "true"
 AWS_REGION        = os.environ.get("AWS_REGION", "us-east-2")
-
-# Rate limiter: pass at most 2 messages per second per sensor (500 ms gap).
-_SPAT_TS_KEY_PREFIX  = "msight:spat:last_ts:"
-_SPAT_TS_TTL_SECONDS = 300
-_SPAT_MIN_INTERVAL_S = 0.5
 
 # ---- module-level singletons (reused across warm invocations) ------------
 _db_conn       = None
@@ -97,21 +97,15 @@ def _get_redis():
     return _redis_client
 
 
-# ---- rate limiter --------------------------------------------------------
+# ---- criticality filter --------------------------------------------------
 
-def _should_pass(sensor_name: str, capture_ts: float) -> bool:
-    """Return True if at least 500 ms has elapsed since the last passed message."""
-    r   = _get_redis()
-    key = _SPAT_TS_KEY_PREFIX + sensor_name
-    lua = """
-local prev = redis.call('GET', KEYS[1])
-if prev and (tonumber(ARGV[1]) - tonumber(prev)) < tonumber(ARGV[2]) then
-    return 0
-end
-redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
-return 1
-"""
-    return r.eval(lua, 1, key, capture_ts, _SPAT_MIN_INTERVAL_S, _SPAT_TS_TTL_SECONDS) == 1
+def is_critical(intersection: dict) -> bool:
+    """Return True if this intersection update should be forwarded to clients.
+
+    Stub: always returns True. Will be replaced with logic that detects
+    signal-phase changes or remaining-time deltas greater than 1 second.
+    """
+    return True
 
 
 # ---- database helpers ----------------------------------------------------
@@ -119,7 +113,7 @@ return 1
 def _get_spat_app_ids() -> list:
     conn = _get_db_conn()
     with conn.cursor() as cur:
-        cur.execute("SELECT app_id FROM apps WHERE receive_spat = TRUE")
+        cur.execute("SELECT app_id FROM apps WHERE receive_critical_spat = TRUE")
         return [row[0] for row in cur.fetchall()]
 
 
@@ -147,9 +141,6 @@ def _uper_hex_from_wsmp(data_b64: str) -> str:
     first = raw[idx]
     uper_start = idx + 1 if first < 0x80 else idx + 1 + (first & 0x7F)
     return raw[uper_start:].hex()
-
-
-# ---- broadcast -----------------------------------------------------------
 
 
 # ---- Lambda entry point --------------------------------------------------
@@ -188,15 +179,6 @@ def handler(event, context):
         except (TypeError, ValueError):
             print(json.dumps({"event": "invalid_timestamp", "sensor_name": sensor_name, "capture_timestamp": str(capture_ts_raw)}))
             continue
-
-        # Rate limit: pass at most 2 Hz per sensor
-        try:
-            passed = _should_pass(sensor_name, capture_ts)
-            print(json.dumps({"event": "rate_check", "sensor_name": sensor_name, "capture_ts": capture_ts, "passed": passed}))
-            if not passed:
-                continue
-        except Exception as e:
-            print(json.dumps({"event": "rate_check_error", "sensor_name": sensor_name, "error": str(e)}))
 
         data_b64 = msg.get("data")
         if not data_b64:
@@ -250,6 +232,10 @@ def handler(event, context):
                 print(json.dumps({"event": "intersection_no_name", "sensor_name": sensor_name}))
                 continue
 
+            if not is_critical(intersection):
+                print(json.dumps({"event": "not_critical", "sensor_name": sensor_name, "intersection_name": intersection_name}))
+                continue
+
             try:
                 pos = _get_intersection_center(intersection_name)
             except Exception as e:
@@ -263,7 +249,7 @@ def handler(event, context):
             lat, lon = pos
 
             ws_message = {
-                "type":               "spat",
+                "type":               "critical_spat",
                 "sensor_name":        sensor_name,
                 "device_name":        msg.get("device_name"),
                 "capture_timestamp":  capture_ts,

@@ -82,8 +82,9 @@ async function main() {
         CREATE TABLE IF NOT EXISTS apps (
           app_id       TEXT PRIMARY KEY,
           display_name TEXT NULL,
-          receive_sdsm BOOLEAN NOT NULL DEFAULT FALSE,
-          receive_spat BOOLEAN NOT NULL DEFAULT FALSE,
+          receive_sdsm          BOOLEAN NOT NULL DEFAULT FALSE,
+          receive_spat          BOOLEAN NOT NULL DEFAULT FALSE,
+          receive_critical_spat BOOLEAN NOT NULL DEFAULT FALSE,
           created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -92,6 +93,10 @@ async function main() {
     {
       label: 'Add receive_spat column (idempotent migration)',
       sql: `ALTER TABLE apps ADD COLUMN IF NOT EXISTS receive_spat BOOLEAN NOT NULL DEFAULT FALSE;`,
+    },
+    {
+      label: 'Add receive_critical_spat column (idempotent migration)',
+      sql: `ALTER TABLE apps ADD COLUMN IF NOT EXISTS receive_critical_spat BOOLEAN NOT NULL DEFAULT FALSE;`,
     },
     {
       label: 'Create maps table',
