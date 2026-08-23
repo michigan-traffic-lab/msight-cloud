@@ -777,6 +777,28 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     // -------------------------
+    // SNS Topic (control channel)
+    // Low-frequency control-plane events (e.g. an object landed in S3, a config
+    // changed, a sensor registered) — not a data path. Standard topic, not FIFO:
+    // ordering is not required here, and FIFO topics only accept SQS FIFO
+    // subscriptions, whereas control consumers subscribe Lambdas directly.
+    //
+    // CONVENTION: publishers MUST set an `event_type` String MessageAttribute,
+    // and every subscription MUST carry a filter policy on it — a subscription
+    // without one receives every control event. Payloads stay small JSON.
+    // -------------------------
+    const controlTopic = new sns.Topic(this, 'MsightControlTopic', {
+      topicName: 'msight-control-topic',
+      displayName: 'MSight Control Channel',
+    });
+
+    new cdk.CfnOutput(this, 'ControlTopicArn', {
+      value: controlTopic.topicArn,
+      description:
+        'SNS topic ARN for low-frequency control events. Subscribers must filter on the event_type message attribute.',
+    });
+
+    // -------------------------
     // Sensor SNS consumer Lambda (Python)
     // -------------------------
 
