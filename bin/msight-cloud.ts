@@ -20,6 +20,7 @@ const app = new cdk.App({
     debugMode:            config['debugMode']            ?? false,
     preferredAz:          config['preferredAz']          ?? '',
     spatBroadcastRadiusM: config['spatBroadcastRadiusM'] ?? 500,
+    adminConsole:         config['adminConsole']         ?? {},
   },
 });
 

@@ -16,3 +16,12 @@ cdk.out*
 
 # Deployment configuration (contains account IDs — do not commit)
 deploy.config.yaml
+
+# Admin console frontend (Vite/Vue). The blanket *.js rule above is aimed at
+# compiled output beside the CDK sources; the frontend keeps its JS config files
+# in source control, so re-include them here.
+!admin-console/**/*.js
+!admin-console/**/*.d.ts
+admin-console/dist/
+admin-console/.env
+admin-console/.env.local

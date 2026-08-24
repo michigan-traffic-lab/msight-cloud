@@ -13,6 +13,9 @@ import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as cr from 'aws-cdk-lib/custom-resources';
+import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { WebSocketLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -72,6 +75,59 @@ function computeBuildId(): string {
   }
 
   return hash.digest('hex').slice(0, 12);
+}
+
+/**
+ * Password policy for the admin console user pool. Declared once so the
+ * synth-time check below cannot drift from what Cognito actually enforces.
+ */
+const ADMIN_PASSWORD_POLICY = {
+  minLength: 12,
+  requireLowercase: true,
+  requireUppercase: true,
+  requireDigits: true,
+  requireSymbols: true,
+} as const;
+
+/** The symbol set Cognito accepts in a password, plus space. */
+const COGNITO_SYMBOL_PATTERN = /[\^$*.\[\]{}()?"!@#%&\/\\,><':;|_~`+=\s-]/;
+
+/**
+ * Validates the configured master password at synth time.
+ *
+ * Without this the failure surfaces inside the bootstrap custom resource, which
+ * means a full deploy, a CloudFormation rollback, and an orphaned user pool
+ * before you learn the password was two characters short.
+ */
+function assertMasterPasswordValid(password: string): void {
+  const problems: string[] = [];
+
+  if (password.length < ADMIN_PASSWORD_POLICY.minLength) {
+    problems.push(
+      `at least ${ADMIN_PASSWORD_POLICY.minLength} characters (it has ${password.length})`
+    );
+  }
+  if (!/[a-z]/.test(password)) {
+    problems.push('a lowercase letter');
+  }
+  if (!/[A-Z]/.test(password)) {
+    problems.push('an uppercase letter');
+  }
+  if (!/[0-9]/.test(password)) {
+    problems.push('a digit');
+  }
+  if (!COGNITO_SYMBOL_PATTERN.test(password)) {
+    problems.push('a symbol (for example ! @ # $ % ^ & * _ + = ~)');
+  }
+
+  if (problems.length > 0) {
+    throw new Error(
+      'deploy.config.yaml: adminConsole.masterPassword does not meet the console user ' +
+        `pool password policy. It needs ${problems.join(', ')}. ` +
+        'Fix it before deploying: Cognito rejects the password inside a custom resource, ' +
+        'which fails the deployment and rolls the whole stack back.'
+    );
+  }
 }
 
 export class MsightCloudStack extends cdk.Stack {
@@ -862,7 +918,7 @@ export class MsightCloudStack extends cdk.Stack {
     const ecsCluster = new ecs.Cluster(this, 'MsightEcsCluster', {
       vpc,
       clusterName: 'msight-cluster',
-      containerInsights: true,
+      containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
 
     // Task role — permissions for the running container (SQS, Secrets Manager, WS management)
@@ -1022,6 +1078,242 @@ export class MsightCloudStack extends cdk.Stack {
     spatTopic.addSubscription(
       new snsSubscriptions.LambdaSubscription(criticalSpatSnsConsumerLambda)
     );
+
+    // -------------------------
+    // Admin console — Cognito user pool
+    //
+    // Self-registration is disabled: the only way an account comes into
+    // existence is the seeded master user below, or an admin creating one from
+    // the Users tab. There is deliberately no sign-up route.
+    // -------------------------
+    const adminConsoleConfig = (this.node.tryGetContext('adminConsole') ?? {}) as {
+      masterUsername?: string;
+      masterEmail?: string;
+      masterPassword?: string;
+      allowedOrigins?: string[];
+    };
+
+    const masterUsername = adminConsoleConfig.masterUsername;
+    const masterEmail = adminConsoleConfig.masterEmail;
+    const masterPassword = adminConsoleConfig.masterPassword;
+
+    if (!masterUsername || !masterEmail || !masterPassword) {
+      throw new Error(
+        'deploy.config.yaml is missing adminConsole.masterUsername / masterEmail / masterPassword. ' +
+          'See deploy.config.example.yaml.'
+      );
+    }
+
+    assertMasterPasswordValid(masterPassword);
+
+    const adminAllowedOrigins = adminConsoleConfig.allowedOrigins ?? [
+      'http://localhost:5173',
+    ];
+
+    const adminUserPool = new cognito.UserPool(this, 'MsightAdminUserPool', {
+      userPoolName: 'msight-admin-pool',
+      selfSignUpEnabled: false,
+      signInAliases: { username: true, email: true },
+      standardAttributes: {
+        email: { required: true, mutable: true },
+      },
+      passwordPolicy: ADMIN_PASSWORD_POLICY,
+      accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+      // The pool holds the only credentials for the console; losing it on a
+      // stack replacement would lock everyone out.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const adminUserPoolClient = adminUserPool.addClient('AdminConsoleClient', {
+      userPoolClientName: 'msight-admin-console',
+      // Public SPA client: no secret, SRP only.
+      generateSecret: false,
+      authFlows: { userSrp: true },
+      preventUserExistenceErrors: true,
+      accessTokenValidity: cdk.Duration.hours(1),
+      idTokenValidity: cdk.Duration.hours(1),
+      refreshTokenValidity: cdk.Duration.days(1),
+    });
+
+    // Access levels. Precedence is Cognito's own tie-breaker (lower wins) and
+    // mirrors ROLE_PRECEDENCE in src/shared/schemas/admin.ts.
+    const adminRoleGroups: Array<{ name: string; description: string; precedence: number }> = [
+      { name: 'admin', description: 'Full control, including user management.', precedence: 1 },
+      { name: 'operator', description: 'Operational actions; cannot manage users.', precedence: 2 },
+      { name: 'viewer', description: 'Read-only access.', precedence: 3 },
+    ];
+
+    const roleGroupResources = adminRoleGroups.map(
+      (group) =>
+        new cognito.CfnUserPoolGroup(this, `AdminRoleGroup-${group.name}`, {
+          userPoolId: adminUserPool.userPoolId,
+          groupName: group.name,
+          description: group.description,
+          precedence: group.precedence,
+        })
+    );
+
+    // -------------------------
+    // Master account seeding
+    //
+    // NOTE: masterPassword reaches CloudFormation as a custom resource property,
+    // so it is readable by anyone with stack read access. Rotate it from the
+    // console after first sign-in, or move it to Secrets Manager.
+    // -------------------------
+    const adminBootstrapLambda = new NodejsFunction(this, 'AdminBootstrapLambda', {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: path.join(__dirname, '../src/functions/admin-bootstrap/handler.ts'),
+      handler: 'handler',
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(60),
+      bundling: { minify: true, sourceMap: false, target: 'node22' },
+    });
+
+    adminBootstrapLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'cognito-idp:AdminCreateUser',
+          'cognito-idp:AdminSetUserPassword',
+          'cognito-idp:AdminAddUserToGroup',
+          'cognito-idp:AdminUpdateUserAttributes',
+        ],
+        resources: [adminUserPool.userPoolArn],
+      })
+    );
+
+    const adminBootstrapProvider = new cr.Provider(this, 'AdminBootstrapProvider', {
+      onEventHandler: adminBootstrapLambda,
+      logGroup: new logs.LogGroup(this, 'AdminBootstrapProviderLogGroup', {
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    });
+
+    const masterUserResource = new cdk.CustomResource(this, 'AdminMasterUser', {
+      serviceToken: adminBootstrapProvider.serviceToken,
+      properties: {
+        UserPoolId: adminUserPool.userPoolId,
+        Username: masterUsername,
+        Email: masterEmail,
+        Password: masterPassword,
+        Role: 'admin',
+      },
+    });
+
+    // The admin group must exist before the master user can be added to it.
+    for (const groupResource of roleGroupResources) {
+      masterUserResource.node.addDependency(groupResource);
+    }
+
+    // -------------------------
+    // Admin API
+    //
+    // Runs outside the VPC on purpose: it calls Cognito and probes the public
+    // endpoints, and the app subnets have no NAT and no Cognito VPC endpoint.
+    // When admin operations need Aurora or Valkey, add a second in-VPC function
+    // behind the same API rather than moving this one inside.
+    // -------------------------
+    const adminApiLambda = new NodejsFunction(this, 'AdminApiLambda', {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: path.join(__dirname, '../src/functions/admin-api/handler.ts'),
+      handler: 'handler',
+      memorySize: 512,
+      // Listing users fans out one groups lookup per user, and the overview
+      // probes public endpoints; 10s is too tight for both.
+      timeout: cdk.Duration.seconds(30),
+      bundling: { minify: true, sourceMap: false, target: 'node22' },
+      environment: {
+        API_VERSION: 'v1',
+        SERVICE_NAME: 'admin-api',
+        BUILD_ID: buildId,
+        USER_POOL_ID: adminUserPool.userPoolId,
+        USER_POOL_CLIENT_ID: adminUserPoolClient.userPoolClientId,
+        HTTP_API_URL: httpApi.apiEndpoint,
+        SENSOR_HTTP_API_URL: sensorHttpApi.apiEndpoint,
+        WS_API_URL: wsApiUrl,
+        SENSOR_TOPIC_ARN: sensorTopic.topicArn,
+        SPAT_TOPIC_ARN: spatTopic.topicArn,
+        CONTROL_TOPIC_ARN: controlTopic.topicArn,
+        SENSOR_NAMES: sensorNameList.join(','),
+      },
+    });
+
+    adminApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'cognito-idp:ListUsers',
+          'cognito-idp:AdminCreateUser',
+          'cognito-idp:AdminDeleteUser',
+          'cognito-idp:AdminEnableUser',
+          'cognito-idp:AdminDisableUser',
+          'cognito-idp:AdminSetUserPassword',
+          'cognito-idp:AdminAddUserToGroup',
+          'cognito-idp:AdminRemoveUserFromGroup',
+          'cognito-idp:AdminListGroupsForUser',
+        ],
+        resources: [adminUserPool.userPoolArn],
+      })
+    );
+
+    const adminApi = new apigwv2.HttpApi(this, 'MsightAdminApi', {
+      apiName: 'msight-admin-api',
+      // Default authorizer, so no route can be added later that is reachable
+      // without a valid console token.
+      defaultAuthorizer: new HttpUserPoolAuthorizer(
+        'AdminConsoleAuthorizer',
+        adminUserPool,
+        { userPoolClients: [adminUserPoolClient] }
+      ),
+      corsPreflight: {
+        allowHeaders: ['content-type', 'authorization'],
+        allowMethods: [
+          apigwv2.CorsHttpMethod.GET,
+          apigwv2.CorsHttpMethod.POST,
+          apigwv2.CorsHttpMethod.PUT,
+          apigwv2.CorsHttpMethod.PATCH,
+          apigwv2.CorsHttpMethod.DELETE,
+          apigwv2.CorsHttpMethod.OPTIONS,
+        ],
+        allowOrigins: adminAllowedOrigins,
+        maxAge: cdk.Duration.hours(1),
+      },
+    });
+
+    // One greedy route: new admin operations are added in the handler's router,
+    // not here.
+    //
+    // Methods are listed explicitly rather than using ANY, and OPTIONS is
+    // deliberately absent. API Gateway answers CORS preflights itself only when
+    // no route matches OPTIONS — an ANY route matches it, sends the preflight
+    // through the JWT authorizer, and the browser (which never attaches
+    // credentials to a preflight) gets a 401 and blocks every request. Leaving
+    // OPTIONS unrouted is what lets the built-in CORS handling do its job.
+    adminApi.addRoutes({
+      path: '/v1/admin/{proxy+}',
+      methods: [
+        apigwv2.HttpMethod.GET,
+        apigwv2.HttpMethod.POST,
+        apigwv2.HttpMethod.PUT,
+        apigwv2.HttpMethod.PATCH,
+        apigwv2.HttpMethod.DELETE,
+      ],
+      integration: new HttpLambdaIntegration('AdminApiIntegration', adminApiLambda),
+    });
+
+    new cdk.CfnOutput(this, 'AdminApiUrl', {
+      value: adminApi.apiEndpoint,
+      description: 'Base URL for the management console API.',
+    });
+
+    new cdk.CfnOutput(this, 'AdminUserPoolId', {
+      value: adminUserPool.userPoolId,
+      description: 'Cognito user pool backing the management console.',
+    });
+
+    new cdk.CfnOutput(this, 'AdminUserPoolClientId', {
+      value: adminUserPoolClient.userPoolClientId,
+      description: 'Cognito app client ID for the management console frontend.',
+    });
 
     if (cacheDebugLambda) {
       new cdk.CfnOutput(this, 'CacheDebugLambdaName', {

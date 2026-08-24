@@ -25,3 +25,26 @@ sensors:
 # ── SPaT broadcast ────────────────────────────────────────────────────────────
 # Radius (metres) used when fanning out SPaT messages to nearby WebSocket clients.
 spatBroadcastRadiusM: 500
+
+# ── Admin console ─────────────────────────────────────────────────────────────
+# The management console has no self-registration. This master account is seeded
+# into the Cognito user pool on every deploy and is the only way in initially;
+# it can then create additional users from the Users tab.
+#
+# SECURITY: masterPassword is passed to a CloudFormation custom resource, so it
+# is visible in the synthesized template and in the CloudFormation console to
+# anyone with stack read access. deploy.config.yaml itself is gitignored. Change
+# this password from the console after the first sign-in, or move it to Secrets
+# Manager if stack-read access is broader than console-admin access should be.
+# masterPassword must satisfy the user pool policy, which is checked at synth
+# time so a bad value fails immediately instead of rolling back a deployment:
+#   - at least 12 characters
+#   - an uppercase letter, a lowercase letter, a digit, and a symbol
+adminConsole:
+  masterUsername: admin
+  masterEmail: you@example.com
+  masterPassword: "ChangeMe!2026"
+  # Origins allowed to call the admin API. Add the console's deployed origin
+  # here once it is hosted; the Vite dev server default is below.
+  allowedOrigins:
+    - http://localhost:5173
