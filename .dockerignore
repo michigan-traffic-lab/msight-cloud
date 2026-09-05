@@ -11,3 +11,22 @@ lib
 test
 tools
 docs
+
+# The sensor-consumer image needs only src/services/sensor-consumer and
+# src/vendor/PyV2XLib_ASN. Anything else left in the build context still feeds
+# the CDK asset hash, so an unrelated edit forces a full image rebuild and ECR
+# push. admin-console/dist in particular is regenerated on every frontend build.
+admin-console
+package.json
+package-lock.json
+jest.config.js
+*.md
+.github
+.vscode
+.claude
+
+# Contains the console master password. It is never COPYed into the image, but
+# keeping it out of the context avoids handing it to the Docker daemon and stops
+# a password change from invalidating the image asset.
+deploy.config.yaml
+deploy.config.example.yaml

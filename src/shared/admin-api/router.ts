@@ -92,6 +92,10 @@ export class Router {
     return this.register('PUT', pattern, handler, options);
   }
 
+  patch(pattern: string, handler: RouteHandler, options?: RouteOptions): this {
+    return this.register('PATCH', pattern, handler, options);
+  }
+
   delete(pattern: string, handler: RouteHandler, options?: RouteOptions): this {
     return this.register('DELETE', pattern, handler, options);
   }

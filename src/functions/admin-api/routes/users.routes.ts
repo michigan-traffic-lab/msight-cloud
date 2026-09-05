@@ -4,9 +4,9 @@ import {
   SetEnabledRequestSchema,
   SetRoleRequestSchema,
 } from '../../../shared/schemas/admin';
-import { created, HttpError, ok, parseWith, readJsonBody, type RequestContext } from '../http';
-import { requireRole } from '../middleware/require-role';
-import { Router } from '../router';
+import { created, HttpError, ok, parseWith, readJsonBody, type RequestContext } from '../../../shared/admin-api/http';
+import { requireRole } from '../../../shared/admin-api/middleware/require-role';
+import { Router } from '../../../shared/admin-api/router';
 import * as users from '../services/cognito';
 
 /**

@@ -1,9 +1,11 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
-import { HttpError, ok, type Middleware, type MutableContext } from '../src/functions/admin-api/http';
-import { Router, runMiddleware } from '../src/functions/admin-api/router';
-import { authenticate, parseGroups, resolveRole } from '../src/functions/admin-api/middleware/auth';
-import { requireRole } from '../src/functions/admin-api/middleware/require-role';
+import { HttpError, ok, type Middleware, type MutableContext } from '../src/shared/admin-api/http';
+import { Router, runMiddleware } from '../src/shared/admin-api/router';
+import { authenticate, parseGroups, resolveRole } from '../src/shared/admin-api/middleware/auth';
+import { requireRole } from '../src/shared/admin-api/middleware/require-role';
 import { buildRouter } from '../src/functions/admin-api/routes';
+import { sensorQueueName } from '../src/shared/sensor-naming';
+import { buildVpcRouter } from '../src/functions/admin-vpc-api/routes';
 
 function makeEvent(groups: unknown, username = 'alice'): APIGatewayProxyEventV2WithJWTAuthorizer {
   return {
@@ -199,7 +201,15 @@ describe('buildRouter', () => {
     expect(buildRouter('v1').list().sort()).toEqual(
       [
         'GET /v1/admin/me',
-        'GET /v1/admin/system/overview',
+        'GET /v1/admin/system/info',
+        'GET /v1/admin/cost/summary',
+        'GET /v1/admin/cost/service',
+        'GET /v1/admin/network/topology',
+        'GET /v1/admin/sensors',
+        'GET /v1/admin/logs/groups',
+        'POST /v1/admin/logs/query',
+        'GET /v1/admin/logs/query/:queryId',
+        'DELETE /v1/admin/logs/query/:queryId',
         'GET /v1/admin/users',
         'POST /v1/admin/users',
         'DELETE /v1/admin/users/:username',
@@ -229,5 +239,181 @@ describe('buildRouter', () => {
       username: 'alice',
       role: 'viewer',
     });
+  });
+});
+
+describe('cost routes', () => {
+  it('are gated behind the admin role', async () => {
+    for (const path of ['/v1/admin/cost/summary', '/v1/admin/cost/service']) {
+      const ctx = makeContext('GET', path, { groups: '[operator]' });
+      await runMiddleware([authenticate], ctx, async () => ok({}));
+      await expect(buildRouter('v1').dispatch(ctx)).rejects.toMatchObject({
+        status: 403,
+        code: 'forbidden',
+      });
+    }
+  });
+});
+
+describe('network route', () => {
+  it('is gated behind the operator role', async () => {
+    const ctx = makeContext('GET', '/v1/admin/network/topology', { groups: '[viewer]' });
+    await runMiddleware([authenticate], ctx, async () => ok({}));
+    await expect(buildRouter('v1').dispatch(ctx)).rejects.toMatchObject({
+      status: 403,
+      code: 'forbidden',
+    });
+  });
+
+});
+
+describe('sensor queue naming', () => {
+  // The CDK stack and the admin API both derive queue names from this helper.
+  // If it changes, the console starts reporting correctly-wired sensors as
+  // missing, so the mapping is pinned here.
+  it('matches the names the stack creates', () => {
+    expect(sensorQueueName('derq_huronPkwy_plymouth')).toBe(
+      'msight-sensor-derq-huronpkwy-plymouth.fifo'
+    );
+    expect(sensorQueueName('simple')).toBe('msight-sensor-simple.fifo');
+  });
+});
+
+describe('in-VPC admin router', () => {
+  // The in-VPC function serves only what genuinely needs Valkey or Aurora.
+  // Nothing here may enumerate the keyspace, so there is deliberately no
+  // "list all clients" route — this pins that.
+  it('registers the in-VPC surface', () => {
+    expect(buildVpcRouter('v1').list().sort()).toEqual(
+      [
+        'GET /v1/admin/clients/summary',
+        'GET /v1/admin/clients/search',
+        'GET /v1/admin/clients/sample',
+        'GET /v1/admin/clients/lookup',
+        'GET /v1/admin/db/aurora/tables',
+        'GET /v1/admin/db/aurora/tables/:table/rows',
+        'POST /v1/admin/db/aurora/query',
+        'PATCH /v1/admin/db/aurora/tables/:table/rows/:pk',
+        'DELETE /v1/admin/db/aurora/tables/:table/rows/:pk',
+        'GET /v1/admin/db/valkey/overview',
+        'GET /v1/admin/db/valkey/key',
+        'POST /v1/admin/db/valkey/key/value',
+        'POST /v1/admin/db/valkey/key/field',
+        'POST /v1/admin/db/valkey/key/ttl',
+        'DELETE /v1/admin/db/valkey/key',
+        'GET /v1/admin/maps',
+        'GET /v1/admin/maps/:name',
+      ].sort()
+    );
+  });
+
+  it('has no route that would list every client', () => {
+    const routes = buildVpcRouter('v1').list();
+    expect(routes).not.toContain('GET /v1/admin/clients');
+    expect(routes.some((route) => route.endsWith('/clients'))).toBe(false);
+  });
+});
+
+describe('log routes', () => {
+  it('are gated behind the operator role', async () => {
+    const ctx = makeContext('GET', '/v1/admin/logs/groups', { groups: '[viewer]' });
+    await runMiddleware([authenticate], ctx, async () => ok({}));
+    await expect(buildRouter('v1').dispatch(ctx)).rejects.toMatchObject({
+      status: 403,
+      code: 'forbidden',
+    });
+  });
+});
+
+describe('aurora routes', () => {
+  // Reads are operator-gated; writes touch tables that drive live SPaT fanout,
+  // so they are admin-only. This pins that gradient.
+  it('gates reads behind operator', async () => {
+    const ctx = makeContext('GET', '/v1/admin/db/aurora/tables', { groups: '[viewer]' });
+    await runMiddleware([authenticate], ctx, async () => ok({}));
+    await expect(buildVpcRouter('v1').dispatch(ctx)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('gates row edits behind admin, not operator', async () => {
+    const ctx = makeContext('PATCH', '/v1/admin/db/aurora/tables/apps/rows/app_demo', {
+      groups: '[operator]',
+      body: { changes: { receive_spat: true } },
+    });
+    await runMiddleware([authenticate], ctx, async () => ok({}));
+    await expect(buildVpcRouter('v1').dispatch(ctx)).rejects.toMatchObject({
+      status: 403,
+      code: 'forbidden',
+    });
+  });
+});
+
+describe('aurora row deletion', () => {
+  it('is admin-only, not operator', async () => {
+    const ctx = makeContext('DELETE', '/v1/admin/db/aurora/tables/apps/rows/app_demo', {
+      groups: '[operator]',
+    });
+    await runMiddleware([authenticate], ctx, async () => ok({}));
+    await expect(buildVpcRouter('v1').dispatch(ctx)).rejects.toMatchObject({
+      status: 403,
+      code: 'forbidden',
+    });
+  });
+
+  it('routes a single row, never a whole table', () => {
+    const routes = buildVpcRouter('v1').list();
+    // A route without the :pk segment would delete by table alone.
+    expect(routes).not.toContain('DELETE /v1/admin/db/aurora/tables/:table/rows');
+    expect(routes).not.toContain('DELETE /v1/admin/db/aurora/tables/:table');
+    expect(routes).toContain('DELETE /v1/admin/db/aurora/tables/:table/rows/:pk');
+  });
+});
+
+describe('valkey debug operations', () => {
+  // The console must expose no way to express a bulk or pattern operation.
+  // Every route takes one fully-qualified key, so FLUSHALL/KEYS/pattern-delete
+  // are unrepresentable rather than merely discouraged.
+  it('offers no bulk or pattern route', () => {
+    const routes = buildVpcRouter('v1').list();
+    for (const forbidden of [
+      'DELETE /v1/admin/db/valkey/keys',
+      'POST /v1/admin/db/valkey/flush',
+      'GET /v1/admin/db/valkey/keys',
+      'DELETE /v1/admin/db/valkey',
+    ]) {
+      expect(routes).not.toContain(forbidden);
+    }
+  });
+
+  it('gates every write behind admin', async () => {
+    const writes: Array<[string, string]> = [
+      ['POST', '/v1/admin/db/valkey/key/value'],
+      ['POST', '/v1/admin/db/valkey/key/field'],
+      ['POST', '/v1/admin/db/valkey/key/ttl'],
+      ['DELETE', '/v1/admin/db/valkey/key'],
+    ];
+
+    for (const [method, path] of writes) {
+      const ctx = makeContext(method, path, { groups: '[operator]', body: {} });
+      await runMiddleware([authenticate], ctx, async () => ok({}));
+      await expect(buildVpcRouter('v1').dispatch(ctx)).rejects.toMatchObject({
+        status: 403,
+        code: 'forbidden',
+      });
+    }
+  });
+});
+
+describe('map routes', () => {
+  it('are read-only — no route can modify MAP geometry', () => {
+    const routes = buildVpcRouter('v1').list();
+    const mapRoutes = routes.filter((route) => route.includes('/maps'));
+    expect(mapRoutes.every((route) => route.startsWith('GET '))).toBe(true);
+    expect(mapRoutes).toHaveLength(2);
+  });
+
+  it('is operator-gated', async () => {
+    const ctx = makeContext('GET', '/v1/admin/maps', { groups: '[viewer]' });
+    await runMiddleware([authenticate], ctx, async () => ok({}));
+    await expect(buildVpcRouter('v1').dispatch(ctx)).rejects.toMatchObject({ status: 403 });
   });
 });

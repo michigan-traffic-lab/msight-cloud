@@ -1,5 +1,9 @@
-import { Router } from '../router';
+import { Router } from '../../../shared/admin-api/router';
 import { identityRoutes } from './identity.routes';
+import { costRoutes } from './cost.routes';
+import { networkRoutes } from './network.routes';
+import { logRoutes } from './logs.routes';
+import { sensorRoutes } from './sensors.routes';
 import { systemRoutes } from './system.routes';
 import { userRoutes } from './users.routes';
 
@@ -16,5 +20,9 @@ export function buildRouter(apiVersion: string): Router {
   return new Router()
     .merge(identityRoutes(base))
     .merge(systemRoutes(base))
+    .merge(costRoutes(base))
+    .merge(networkRoutes(base))
+    .merge(sensorRoutes(base))
+    .merge(logRoutes(base))
     .merge(userRoutes(base));
 }

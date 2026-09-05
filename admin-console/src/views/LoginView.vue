@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus';
 import type { CognitoUser } from 'amazon-cognito-identity-js';
 import { completeNewPassword, NewPasswordRequiredError, signIn } from '@/auth/cognito';
 import { useAuthStore } from '@/stores/auth';
+import BrandMark from '@/components/BrandMark.vue';
 
 const auth = useAuthStore();
 const route = useRoute();
@@ -77,7 +78,7 @@ async function onSubmitNewPassword() {
   <div class="login">
     <div class="login__card">
       <div class="login__brand">
-        <div class="login__mark">M</div>
+        <BrandMark :size="44" />
         <div>
           <div class="login__name">MSight Cloud</div>
           <div class="login__sub">Management Console</div>
@@ -164,7 +165,7 @@ async function onSubmitNewPassword() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(160deg, #12182b 0%, #1e2740 55%, #24305180 100%);
+  background: linear-gradient(160deg, #00274c 0%, #003e6b 55%, #01527f 100%);
   padding: 24px;
 }
 
@@ -182,19 +183,6 @@ async function onSubmitNewPassword() {
   align-items: center;
   gap: 12px;
   margin-bottom: 28px;
-}
-
-.login__mark {
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #2f6bff, #6c9bff);
-  color: #fff;
-  font-weight: 700;
-  font-size: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
 
 .login__name {

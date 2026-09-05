@@ -2,7 +2,7 @@ import {
   ADMIN_ROLES,
   ROLE_PRECEDENCE,
   type AdminRole,
-} from '../../../shared/schemas/admin';
+} from '../../schemas/admin';
 import { HttpError, type Caller, type Middleware } from '../http';
 
 /**

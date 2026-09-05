@@ -7,10 +7,10 @@ import {
   json,
   type Middleware,
   type MutableContext,
-} from './http';
-import { authenticate } from './middleware/auth';
+} from '../../shared/admin-api/http';
+import { authenticate } from '../../shared/admin-api/middleware/auth';
 import { buildRouter } from './routes';
-import { runMiddleware } from './router';
+import { runMiddleware } from '../../shared/admin-api/router';
 
 const API_VERSION = process.env.API_VERSION ?? 'v1';
 const SERVICE_NAME = process.env.SERVICE_NAME ?? 'admin-api';

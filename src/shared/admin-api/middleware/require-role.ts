@@ -1,4 +1,4 @@
-import { ROLE_PRECEDENCE, type AdminRole } from '../../../shared/schemas/admin';
+import { ROLE_PRECEDENCE, type AdminRole } from '../../schemas/admin';
 import { HttpError, type Caller, type Middleware } from '../http';
 
 /** True when the caller holds `required` or anything more privileged. */

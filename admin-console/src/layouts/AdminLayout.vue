@@ -1,19 +1,25 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { useRoute, useRouter, RouterView } from 'vue-router';
+import { useRoute, useRouter, RouterView, RouterLink } from 'vue-router';
 import { ElMessageBox } from 'element-plus';
 import { useAuthStore } from '@/stores/auth';
+import BrandMark from '@/components/BrandMark.vue';
+import { FEATURE_GROUPS } from '@/features';
 
 const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 
-/** New tabs are added here and in the router — nothing else needs to change. */
-const navItems = computed(() =>
-  [
-    { name: 'overview', label: 'Overview', icon: 'DataBoard', adminOnly: false },
-    { name: 'users', label: 'Users', icon: 'User', adminOnly: true },
-  ].filter((item) => !item.adminOnly || auth.isAdmin)
+/**
+ * Sidebar is derived from the feature registry, filtered to what this role may
+ * see. Groups that end up empty are dropped rather than rendered as a bare
+ * heading.
+ */
+const visibleGroups = computed(() =>
+  FEATURE_GROUPS.map((group) => ({
+    label: group.label,
+    features: group.features.filter((feature) => auth.hasAtLeast(feature.minRole)),
+  })).filter((group) => group.features.length > 0)
 );
 
 const roleTagType = computed(() => {
@@ -46,7 +52,7 @@ async function confirmSignOut() {
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand__mark">M</div>
+        <BrandMark :size="36" />
         <div>
           <div class="brand__name">MSight Cloud</div>
           <div class="brand__sub">Management Console</div>
@@ -54,16 +60,20 @@ async function confirmSignOut() {
       </div>
 
       <nav class="nav">
-        <RouterLink
-          v-for="item in navItems"
-          :key="item.name"
-          class="nav__item"
-          :class="{ 'nav__item--active': route.name === item.name }"
-          :to="{ name: item.name }"
-        >
-          <el-icon class="nav__icon"><component :is="item.icon" /></el-icon>
-          <span>{{ item.label }}</span>
-        </RouterLink>
+        <div v-for="group in visibleGroups" :key="group.label" class="nav__group">
+          <div class="nav__heading">{{ group.label }}</div>
+          <RouterLink
+            v-for="item in group.features"
+            :key="item.name"
+            class="nav__item"
+            :class="{ 'nav__item--active': route.name === item.name }"
+            :to="{ name: item.name }"
+          >
+            <el-icon class="nav__icon"><component :is="item.icon" /></el-icon>
+            <span class="nav__label">{{ item.label }}</span>
+            <span v-if="item.status === 'planned'" class="nav__soon">soon</span>
+          </RouterLink>
+        </div>
       </nav>
     </aside>
 
@@ -99,26 +109,14 @@ async function confirmSignOut() {
   display: flex;
   flex-direction: column;
   padding: 20px 14px;
+  overflow-y: auto;
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 4px 8px 24px;
-}
-
-.brand__mark {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, #2f6bff, #6c9bff);
-  color: #fff;
-  font-weight: 700;
-  font-size: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  padding: 4px 8px 20px;
 }
 
 .brand__name {
@@ -137,14 +135,29 @@ async function confirmSignOut() {
 .nav {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 18px;
+}
+
+.nav__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav__heading {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: #6f88a6;
+  padding: 0 12px 6px;
 }
 
 .nav__item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
+  padding: 9px 12px;
   border-radius: 8px;
   color: var(--sidebar-text);
   text-decoration: none;
@@ -160,11 +173,34 @@ async function confirmSignOut() {
 
 .nav__item--active {
   background: var(--sidebar-active);
-  color: var(--sidebar-text-active);
+  color: var(--sidebar-active-text);
+  font-weight: 600;
 }
 
 .nav__icon {
   font-size: 16px;
+  flex-shrink: 0;
+}
+
+.nav__label {
+  flex: 1;
+  min-width: 0;
+}
+
+.nav__soon {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #8ea6bf;
+  border: 1px solid #2b4f74;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.nav__item--active .nav__soon {
+  color: var(--sidebar-active-text);
+  border-color: #00274c55;
 }
 
 .main {

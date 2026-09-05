@@ -12,8 +12,8 @@ import {
   type UserType,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { ADMIN_ROLES, type AdminRole, type AdminUser } from '../../../shared/schemas/admin';
-import { HttpError } from '../http';
-import { resolveRole } from '../middleware/auth';
+import { HttpError } from '../../../shared/admin-api/http';
+import { resolveRole } from '../../../shared/admin-api/middleware/auth';
 
 const client = new CognitoIdentityProviderClient({});
 

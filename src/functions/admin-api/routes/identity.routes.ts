@@ -1,6 +1,6 @@
 import { MeResponseSchema } from '../../../shared/schemas/admin';
-import { ok } from '../http';
-import { Router } from '../router';
+import { ok } from '../../../shared/admin-api/http';
+import { Router } from '../../../shared/admin-api/router';
 
 /**
  * Who am I. Available to every signed-in caller regardless of role — the

@@ -23,6 +23,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import { sensorQueueName } from '../src/shared/sensor-naming';
 
 function collectTypeScriptFiles(rootDir: string): string[] {
   const filePaths: string[] = [];
@@ -76,6 +77,16 @@ function computeBuildId(): string {
 
   return hash.digest('hex').slice(0, 12);
 }
+
+/**
+ * Fallback tag applied when deploy.config.yaml specifies none.
+ *
+ * `Project` is the key already activated as a cost allocation tag in the
+ * account this stack deploys into, and the key other teams there use, so an
+ * untagged deploy still lands in the right place rather than nowhere.
+ */
+const DEFAULT_COST_TAG_KEY = 'Project';
+const DEFAULT_COST_TAG_VALUE = 'msight-cloud';
 
 /**
  * Password policy for the admin console user pool. Declared once so the
@@ -133,6 +144,43 @@ function assertMasterPasswordValid(password: string): void {
 export class MsightCloudStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
+
+    // -------------------------
+    // Resource tags
+    //
+    // Applied to every taggable resource in the stack. This is what lets Cost
+    // Explorer separate this stack's spend from the rest of a shared account —
+    // without it, cost queries can only return account-wide totals.
+    //
+    // Tagging is not retroactive: spend is attributed only from the moment
+    // resources actually carry the tag, so the first tagged deploy is the start
+    // of any usable cost history.
+    // -------------------------
+    const configuredTags = (this.node.tryGetContext('tags') ?? {}) as Record<string, unknown>;
+    const stackTags: Record<string, string> = Object.fromEntries(
+      Object.entries(configuredTags).map(([key, value]) => [key, String(value)])
+    );
+
+    if (Object.keys(stackTags).length === 0) {
+      stackTags[DEFAULT_COST_TAG_KEY] = DEFAULT_COST_TAG_VALUE;
+    }
+
+    const costAllocationTagKey: string =
+      this.node.tryGetContext('costAllocationTagKey') ?? DEFAULT_COST_TAG_KEY;
+
+    // A cost tag that is never applied to anything would make the console's cost
+    // page silently return zero rather than fail, so catch it at synth.
+    if (!stackTags[costAllocationTagKey]) {
+      throw new Error(
+        `deploy.config.yaml: costAllocationTagKey is "${costAllocationTagKey}", but no such key ` +
+          `exists under tags. Add it, or point costAllocationTagKey at one of: ` +
+          `${Object.keys(stackTags).join(', ')}.`
+      );
+    }
+
+    for (const [key, value] of Object.entries(stackTags)) {
+      cdk.Tags.of(this).add(key, value);
+    }
 
     const buildId = computeBuildId();
     const preferredAz = this.node.tryGetContext('preferredAz');
@@ -941,10 +989,10 @@ export class MsightCloudStack extends cdk.Stack {
     // One SQS FIFO queue + SNS subscription + ECS Fargate service per sensor.
     // NOTE: the publisher must include sensor_name as a SNS MessageAttribute for filtering to work.
     for (const sensorName of sensorNameList) {
-      const safeName = sensorName.replace(/_/g, '-').toLowerCase();
-
       const sensorQueue = new sqs.Queue(this, `SensorQueue-${sensorName}`, {
-        queueName: `msight-sensor-${safeName}.fifo`,
+        // Derived by a helper shared with the admin API, so the console cannot
+        // look for a queue name this stack never created.
+        queueName: sensorQueueName(sensorName),
         fifo: true,
         contentBasedDeduplication: true,
         visibilityTimeout: cdk.Duration.seconds(60),
@@ -1235,6 +1283,9 @@ export class MsightCloudStack extends cdk.Stack {
         SPAT_TOPIC_ARN: spatTopic.topicArn,
         CONTROL_TOPIC_ARN: controlTopic.topicArn,
         SENSOR_NAMES: sensorNameList.join(','),
+        // Identifies this stack's spend in Cost Explorer.
+        COST_TAG_KEY: costAllocationTagKey,
+        COST_TAG_VALUE: stackTags[costAllocationTagKey],
       },
     });
 
@@ -1252,6 +1303,70 @@ export class MsightCloudStack extends cdk.Stack {
           'cognito-idp:AdminListGroupsForUser',
         ],
         resources: [adminUserPool.userPoolArn],
+      })
+    );
+
+    // CloudWatch Logs for the console's Logs page. Read plus the Insights query
+    // lifecycle; no ability to write or delete log data.
+    adminApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'logs:DescribeLogGroups',
+          'logs:StartQuery',
+          'logs:GetQueryResults',
+          'logs:StopQuery',
+        ],
+        resources: ['*'],
+      })
+    );
+
+    // Sensor inventory for the console: queue depth per sensor, and the topic
+    // subscription filter that routes to it. Read-only.
+    adminApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'sqs:GetQueueUrl',
+          'sqs:GetQueueAttributes',
+          'sns:ListSubscriptionsByTopic',
+          'sns:GetSubscriptionAttributes',
+        ],
+        resources: ['*'],
+      })
+    );
+
+    // Read-only network inspection for the console's Network page. All are
+    // Describe/List calls; none can change the topology, which CDK owns.
+    adminApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'ec2:DescribeVpcs',
+          'ec2:DescribeSubnets',
+          'ec2:DescribeRouteTables',
+          'ec2:DescribeSecurityGroups',
+          'ec2:DescribeNatGateways',
+          'ec2:DescribeInternetGateways',
+          'ec2:DescribeVpcEndpoints',
+          'ec2:DescribeNetworkInterfaces',
+          'lambda:ListFunctions',
+        ],
+        // EC2 Describe actions do not support resource-level permissions.
+        resources: ['*'],
+      })
+    );
+
+    // Cost Explorer for the console's cost page. These are read-only and do not
+    // support resource-level permissions, so '*' is the only valid resource.
+    // Note that ce:GetCostAndUsage is billed per request — the API caches
+    // responses rather than calling it per page view.
+    adminApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'ce:GetCostAndUsage',
+          'ce:GetCostForecast',
+          'ce:GetDimensionValues',
+          'ce:GetTags',
+        ],
+        resources: ['*'],
       })
     );
 
@@ -1279,6 +1394,67 @@ export class MsightCloudStack extends cdk.Stack {
       },
     });
 
+    // -------------------------
+    // Admin API — in-VPC half
+    //
+    // Valkey and Aurora are reachable only from inside the VPC, so the routes
+    // that touch them run here instead of on the function above. Both sit
+    // behind the same API and the same authorizer; only placement differs.
+    // -------------------------
+    const adminVpcApiLambda = new NodejsFunction(this, 'AdminVpcApiLambda', {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: path.join(__dirname, '../src/functions/admin-vpc-api/handler.ts'),
+      handler: 'handler',
+      memorySize: 512,
+      timeout: cdk.Duration.seconds(30),
+      vpc,
+      vpcSubnets: appSubnetSelection,
+      securityGroups: [lambdaSg],
+      bundling: { minify: true, sourceMap: false, target: 'node22' },
+      environment: {
+        API_VERSION: 'v1',
+        SERVICE_NAME: 'admin-vpc-api',
+        BUILD_ID: buildId,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+        DB_HOST: proxy.endpoint,
+        DB_PORT: '5432',
+        DB_NAME: 'msight',
+        DB_SECRET_ARN: cluster.secret!.secretArn,
+        // Apps whose client fleets the console can inspect. Sourced from config
+        // rather than discovered, so the console never scans the keyspace.
+        CLIENT_APP_IDS: ((this.node.tryGetContext('clientAppIds') ?? []) as string[]).join(','),
+        SENSOR_NAMES: sensorNameList.join(','),
+      },
+    });
+
+    cluster.secret!.grantRead(adminVpcApiLambda);
+
+    const adminVpcIntegration = new HttpLambdaIntegration(
+      'AdminVpcApiIntegration',
+      adminVpcApiLambda
+    );
+
+    // More specific than the catch-all below, so API Gateway prefers these.
+    // Both the bare prefix and its children are needed — a greedy path variable
+    // does not match the prefix on its own.
+    for (const prefix of ['clients', 'db', 'maps']) {
+      for (const routePath of [`/v1/admin/${prefix}`, `/v1/admin/${prefix}/{proxy+}`]) {
+        adminApi.addRoutes({
+          path: routePath,
+          methods: [
+            apigwv2.HttpMethod.GET,
+            apigwv2.HttpMethod.POST,
+            apigwv2.HttpMethod.PUT,
+            apigwv2.HttpMethod.PATCH,
+            apigwv2.HttpMethod.DELETE,
+          ],
+          integration: adminVpcIntegration,
+        });
+      }
+    }
+
     // One greedy route: new admin operations are added in the handler's router,
     // not here.
     //
@@ -1299,6 +1475,56 @@ export class MsightCloudStack extends cdk.Stack {
       ],
       integration: new HttpLambdaIntegration('AdminApiIntegration', adminApiLambda),
     });
+
+    // -------------------------
+    // API Gateway access logs
+    //
+    // Without these you can see what a Lambda did but not which requests
+    // reached the API, their status codes, or their latency — the gap between
+    // "the function ran fine" and "the caller got an error".
+    //
+    // Short retention on purpose: access logs are high-volume and useful mainly
+    // while an incident is live. Set through the L1 stage because the L2 HTTP
+    // API construct exposes no access-log property.
+    // -------------------------
+    const accessLogFormat = JSON.stringify({
+      requestId: '$context.requestId',
+      ip: '$context.identity.sourceIp',
+      requestTime: '$context.requestTime',
+      httpMethod: '$context.httpMethod',
+      routeKey: '$context.routeKey',
+      path: '$context.path',
+      status: '$context.status',
+      responseLatency: '$context.responseLatency',
+      integrationStatus: '$context.integrationStatus',
+      integrationErrorMessage: '$context.integrationErrorMessage',
+    });
+
+    // HTTP API stages only. The WebSocket API is deliberately absent: unlike
+    // HTTP APIs, WebSocket stages require an account-level CloudWatch Logs role
+    // ARN before logging can be enabled, and that setting is a per-account,
+    // per-region singleton shared with every other API Gateway in this account.
+    // Claiming it from this stack would change behaviour for unrelated teams,
+    // so WebSocket access logs stay off until someone owns that decision.
+    const apiStages: Array<{ id: string; stage: apigwv2.IStage }> = [
+      { id: 'HttpApi', stage: httpApi.defaultStage! },
+      { id: 'SensorHttpApi', stage: sensorHttpApi.defaultStage! },
+      { id: 'AdminApi', stage: adminApi.defaultStage! },
+    ];
+
+    for (const { id, stage } of apiStages) {
+      const accessLogGroup = new logs.LogGroup(this, `${id}AccessLogs`, {
+        logGroupName: `/msight/apigw/${id}`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      });
+
+      const cfnStage = stage.node.defaultChild as apigwv2.CfnStage;
+      cfnStage.accessLogSettings = {
+        destinationArn: accessLogGroup.logGroupArn,
+        format: accessLogFormat,
+      };
+    }
 
     new cdk.CfnOutput(this, 'AdminApiUrl', {
       value: adminApi.apiEndpoint,

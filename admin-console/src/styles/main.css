@@ -1,9 +1,20 @@
 :root {
-  --sidebar-bg: #12182b;
-  --sidebar-bg-hover: #1e2740;
-  --sidebar-active: #2f6bff;
-  --sidebar-text: #a7b0c6;
+  /* University of Michigan blue and maize. The logo already carries maize, so
+     the drawer uses the official pairing rather than an invented palette. */
+  --sidebar-bg: #00274c;
+  --sidebar-bg-hover: #003e6b;
+  --sidebar-active: #ffcb05;
+  /* Maize is far too light for white text; the active item flips to navy ink. */
+  --sidebar-active-text: #00274c;
+  --sidebar-text: #a3b6cc;
   --sidebar-text-active: #ffffff;
+
+  /* MSight brand amber, matching the mark. */
+  --brand: #f7b71d;
+
+  /* Accent for links and focus rings on light surfaces. Maize is unreadable
+     there, so this is a separate token rather than a reuse of --sidebar-active. */
+  --accent: #00558c;
 
   --page-bg: #f4f6fa;
   --card-bg: #ffffff;

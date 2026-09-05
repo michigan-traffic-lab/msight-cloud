@@ -26,6 +26,26 @@ sensors:
 # Radius (metres) used when fanning out SPaT messages to nearby WebSocket clients.
 spatBroadcastRadiusM: 500
 
+# ── Resource tags ─────────────────────────────────────────────────────────────
+# Applied to every taggable resource in the stack.
+#
+# Tagging is what lets Cost Explorer separate this stack's spend from everything
+# else in a shared AWS account. The tag key named by costAllocationTagKey must be
+# activated as a cost allocation tag in the payer account before cost queries can
+# filter on it — "Project" already is, in the account this deploys to.
+#
+# Cost attribution is NOT retroactive: spend is attributed only from the moment
+# resources carry the tag, so the first tagged deploy starts the history.
+#
+# Omit this block entirely and the stack falls back to Project: msight-cloud.
+tags:
+  Project: msight-cloud
+  Environment: production
+
+# Which of the tags above identifies this stack when querying Cost Explorer.
+# Must be one of the keys defined under `tags`; synth fails otherwise.
+costAllocationTagKey: Project
+
 # ── Admin console ─────────────────────────────────────────────────────────────
 # The management console has no self-registration. This master account is seeded
 # into the Cognito user pool on every deploy and is the only way in initially;
@@ -48,3 +68,10 @@ adminConsole:
   # here once it is hosted; the Vite dev server default is below.
   allowedOrigins:
     - http://localhost:5173
+
+# ── Live clients ──────────────────────────────────────────────────────────────
+# App IDs whose connected-client fleets the console may inspect. Listed here
+# rather than discovered, so the console never has to scan the Valkey keyspace
+# to find out which apps exist.
+clientAppIds:
+  - app_demo

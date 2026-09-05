@@ -21,6 +21,9 @@ const app = new cdk.App({
     preferredAz:          config['preferredAz']          ?? '',
     spatBroadcastRadiusM: config['spatBroadcastRadiusM'] ?? 500,
     adminConsole:         config['adminConsole']         ?? {},
+    tags:                 config['tags']                 ?? {},
+    costAllocationTagKey: config['costAllocationTagKey'] ?? 'Project',
+    clientAppIds:         config['clientAppIds']         ?? [],
   },
 });
 

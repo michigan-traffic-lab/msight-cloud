@@ -12,6 +12,17 @@ export const useAuthStore = defineStore('auth', () => {
   const role = computed<AdminRole | null>(() => me.value?.role ?? null);
   const isAdmin = computed(() => role.value === 'admin');
 
+  /** Mirrors ROLE_PRECEDENCE on the backend: lower number, more privilege. */
+  const PRECEDENCE: Record<AdminRole, number> = { admin: 1, operator: 2, viewer: 3 };
+
+  /** True when the signed-in user holds `required` or anything above it. */
+  function hasAtLeast(required: AdminRole): boolean {
+    if (!role.value) {
+      return false;
+    }
+    return PRECEDENCE[role.value] <= PRECEDENCE[required];
+  }
+
   /** Restores a persisted Cognito session on page load. Safe to call repeatedly. */
   async function restore(): Promise<void> {
     if (initialized.value) {
@@ -41,5 +52,16 @@ export const useAuthStore = defineStore('auth', () => {
     initialized.value = true;
   }
 
-  return { me, loading, initialized, signedIn, role, isAdmin, restore, loadProfile, signOut };
+  return {
+    me,
+    loading,
+    initialized,
+    signedIn,
+    role,
+    isAdmin,
+    hasAtLeast,
+    restore,
+    loadProfile,
+    signOut,
+  };
 });
