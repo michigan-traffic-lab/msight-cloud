@@ -10,6 +10,7 @@ import {
 } from '../../shared/admin-api/http';
 import { authenticate } from '../../shared/admin-api/middleware/auth';
 import { buildVpcRouter } from './routes';
+import { reconcile } from './services/sensor-registry';
 import { runMiddleware } from '../../shared/admin-api/router';
 
 const API_VERSION = process.env.API_VERSION ?? 'v1';
@@ -47,9 +48,36 @@ function buildContext(
   };
 }
 
+/**
+ * EventBridge invokes this function on a schedule to converge sensor
+ * infrastructure with the registry. That arrives as a bare object rather than
+ * an API Gateway event, so it is handled before the router — which would
+ * otherwise fail trying to read HTTP fields that are not there.
+ */
+function isScheduledReconcile(event: unknown): boolean {
+  return (
+    typeof event === 'object' &&
+    event !== null &&
+    (event as { action?: unknown }).action === 'reconcile'
+  );
+}
+
 export async function handler(
   event: APIGatewayProxyEventV2WithJWTAuthorizer
 ): Promise<APIGatewayProxyStructuredResultV2> {
+  if (isScheduledReconcile(event)) {
+    try {
+      const result = await reconcile();
+      return json(200, result);
+    } catch (error) {
+      console.error('scheduled reconcile failed', error);
+      return json(500, {
+        error: 'reconcile_failed',
+        message: error instanceof Error ? error.message : 'Unknown failure.',
+      });
+    }
+  }
+
   const ctx = buildContext(event);
 
   try {

@@ -17,6 +17,9 @@ const OTHER_COLOR = '#8b8b86';
 /** A donut is only readable at a glance; past six segments it stops being one. */
 const MAX_SLICES = 5;
 
+/** Marks the folded slice, so selecting it can be told from selecting a service. */
+const OTHER_PREFIX = 'Other (';
+
 /** Date range: empty means current month to date, which is the default view. */
 const range = ref<[string, string] | null>(null);
 const selected = ref<string | null>(null);
@@ -41,15 +44,27 @@ const summary = useAsyncValue<CostSummary>(
 // refs, so `detail.state.value` would collapse to a bare string in the template.
 const detail = shallowRef<ReturnType<typeof useAsyncValue<CostServiceDetail>> | null>(null);
 
+/** True when the folded "Other" slice is selected rather than a real service. */
+const isOtherSelected = computed(
+  () => selected.value !== null && selected.value.startsWith(OTHER_PREFIX)
+);
+
+/** The services folded into "Other", in the same rank order as the chart. */
+const otherComponents = computed(() =>
+  (summary.data.value?.components ?? []).slice(MAX_SLICES)
+);
+
 // Selecting a slice loads its detail on its own request, so a slow drill-down
-// never blocks the chart that triggered it.
+// never blocks the chart that triggered it. "Other" is an aggregate with no
+// Cost Explorer identity, so it is rendered from data already in hand instead.
 watch(selected, (service) => {
-  detail.value = service
-    ? useAsyncValue<CostServiceDetail>(
-        (signal) => api.costServiceDetail(service, params.value, signal),
-        { timeoutMs: 30000 }
-      )
-    : null;
+  detail.value =
+    service && !service.startsWith(OTHER_PREFIX)
+      ? useAsyncValue<CostServiceDetail>(
+          (signal) => api.costServiceDetail(service, params.value, signal),
+          { timeoutMs: 30000 }
+        )
+      : null;
 });
 
 function openSearch() {
@@ -107,7 +122,7 @@ const slices = computed<DonutSlice[]>(() => {
   const tail = components.slice(MAX_SLICES);
   if (tail.length > 0) {
     head.push({
-      label: `Other (${tail.length})`,
+      label: `${OTHER_PREFIX}${tail.length})`,
       amount: tail.reduce((sum, component) => sum + component.amount, 0),
       share: tail.reduce((sum, component) => sum + component.share, 0),
       color: OTHER_COLOR,
@@ -167,9 +182,8 @@ function money(value: number, currency = 'USD'): string {
   }).format(value);
 }
 
-/** "Other" is an aggregate, not a service — there is nothing to drill into. */
 function onSelect(label: string | null) {
-  selected.value = label && label.startsWith('Other (') ? null : label;
+  selected.value = label;
 }
 </script>
 
@@ -328,6 +342,49 @@ function onSelect(label: string | null) {
           Select a segment in the chart, or a row in the list, to see what makes up that
           service's cost.
         </div>
+
+        <!-- "Other" is an aggregate with no Cost Explorer identity of its own,
+             so it lists the services folded into it. Each one is selectable, so
+             the tail is still one click from a usage-type breakdown. -->
+        <template v-else-if="isOtherSelected">
+          <div class="detail__total">
+            {{ money(
+              otherComponents.reduce((sum, c) => sum + c.amount, 0),
+              summary.data.value?.currency
+            ) }}
+            <span class="detail__total-label">
+              across {{ otherComponents.length }} services
+            </span>
+          </div>
+
+          <table class="usage">
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th class="usage__num">Share</th>
+                <th class="usage__num">Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="component in otherComponents"
+                :key="component.service"
+                class="otherrow"
+                @click="onSelect(component.service)"
+              >
+                <td class="usage__type">{{ component.service }}</td>
+                <td class="usage__num">{{ (component.share * 100).toFixed(1) }}%</td>
+                <td class="usage__num mono">
+                  {{ money(component.amount, summary.data.value?.currency) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p class="hint">
+            Percentages are of the period total, not of Other. Click a row to drill into it.
+          </p>
+        </template>
 
         <AsyncValue
           v-else-if="detail"
@@ -550,6 +607,21 @@ function onSelect(label: string | null) {
 .usage__num {
   text-align: right;
   width: 84px;
+}
+
+.otherrow {
+  cursor: pointer;
+}
+
+.otherrow:hover td {
+  background: var(--page-bg);
+}
+
+.hint {
+  margin: 14px 0 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.6;
 }
 
 .timestamp {

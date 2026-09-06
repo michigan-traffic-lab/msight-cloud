@@ -14,6 +14,9 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
@@ -23,7 +26,13 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import { sensorQueueName } from '../src/shared/sensor-naming';
+import {
+  assertDeploymentName,
+  DEPLOYMENT_TAG_KEY,
+  names,
+  sensorQueueName,
+  type ResourceNameOverrides,
+} from '../src/shared/deployment-naming';
 
 function collectTypeScriptFiles(rootDir: string): string[] {
   const filePaths: string[] = [];
@@ -156,14 +165,28 @@ export class MsightCloudStack extends cdk.Stack {
     // resources actually carry the tag, so the first tagged deploy is the start
     // of any usable cost history.
     // -------------------------
+    // Resolved first: every resource name and the tag set derive from it.
+    const deployment: string = this.node.tryGetContext('deploymentName') ?? DEFAULT_COST_TAG_VALUE;
+    assertDeploymentName(deployment);
+    // Explicit pins keep an existing deployment's resources from being replaced;
+    // anything omitted falls back to a deployment-scoped default.
+    const nameOverrides = (this.node.tryGetContext('resourceNames') ??
+      {}) as ResourceNameOverrides;
+    const name = names(deployment, nameOverrides);
+
     const configuredTags = (this.node.tryGetContext('tags') ?? {}) as Record<string, unknown>;
     const stackTags: Record<string, string> = Object.fromEntries(
       Object.entries(configuredTags).map(([key, value]) => [key, String(value)])
     );
 
     if (Object.keys(stackTags).length === 0) {
-      stackTags[DEFAULT_COST_TAG_KEY] = DEFAULT_COST_TAG_VALUE;
+      stackTags[DEFAULT_COST_TAG_KEY] = deployment;
     }
+
+    // Identifies the deployment rather than the product. Runtime-created sensor
+    // resources carry the same tag, and teardown enumerates by it — a constant
+    // here would let one deployment's destroy reap another's queues.
+    stackTags[DEPLOYMENT_TAG_KEY] = deployment;
 
     const costAllocationTagKey: string =
       this.node.tryGetContext('costAllocationTagKey') ?? DEFAULT_COST_TAG_KEY;
@@ -628,7 +651,7 @@ export class MsightCloudStack extends cdk.Stack {
     );
 
     const httpApi = new apigwv2.HttpApi(this, 'MsightHttpApi', {
-      apiName: 'msight-http-api',
+      apiName: name.httpApi,
       corsPreflight: {
         allowHeaders: ['content-type', 'authorization'],
         allowMethods: [
@@ -713,7 +736,7 @@ export class MsightCloudStack extends cdk.Stack {
     // Sensor HTTP API (dual-stack IPv4 + IPv6)
     // -------------------------
     const sensorHttpApi = new apigwv2.HttpApi(this, 'MsightSensorHttpApi', {
-      apiName: 'msight-sensor-http-api',
+      apiName: name.sensorHttpApi,
       ipAddressType: apigwv2.IpAddressType.DUAL_STACK,
       corsPreflight: {
         allowHeaders: ['content-type', 'x-partition-key'],
@@ -733,7 +756,7 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     const wsApi = new apigwv2.WebSocketApi(this, 'MsightWsApi', {
-      apiName: 'msight-ws-api',
+      apiName: name.wsApi,
       connectRouteOptions: {
         integration: wsConnectIntegration,
       },
@@ -853,7 +876,7 @@ export class MsightCloudStack extends cdk.Stack {
     // SNS Topic (sensor fanout)
     // -------------------------
     const sensorTopic = new sns.Topic(this, 'MsightSensorTopic', {
-      topicName: 'msight-sensor-topic.fifo',
+      topicName: name.sensorTopic,
       displayName: 'MSight Sensor Data Fanout',
       fifo: true,
       contentBasedDeduplication: true,
@@ -871,7 +894,7 @@ export class MsightCloudStack extends cdk.Stack {
     // SNS Topic (SPaT fanout)
     // -------------------------
     const spatTopic = new sns.Topic(this, 'MsightSpatTopic', {
-      topicName: 'msight-spat-topic',
+      topicName: name.spatTopic,
       displayName: 'MSight SPaT Data Fanout',
     });
 
@@ -892,7 +915,7 @@ export class MsightCloudStack extends cdk.Stack {
     // without one receives every control event. Payloads stay small JSON.
     // -------------------------
     const controlTopic = new sns.Topic(this, 'MsightControlTopic', {
-      topicName: 'msight-control-topic',
+      topicName: name.controlTopic,
       displayName: 'MSight Control Channel',
     });
 
@@ -957,7 +980,7 @@ export class MsightCloudStack extends cdk.Stack {
     // -------------------------
     // Sensor list — sourced from deploy.config.yaml via CDK context
     // -------------------------
-    const sensorNameList: string[] = this.node.tryGetContext('sensors') ?? [];
+    let sensorQueueGrantScope: string;
     const spatBroadcastRadiusM: number = this.node.tryGetContext('spatBroadcastRadiusM') ?? 500;
 
     // -------------------------
@@ -965,14 +988,14 @@ export class MsightCloudStack extends cdk.Stack {
     // -------------------------
     const ecsCluster = new ecs.Cluster(this, 'MsightEcsCluster', {
       vpc,
-      clusterName: 'msight-cluster',
+      clusterName: name.cluster,
       containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
 
     // Task role — permissions for the running container (SQS, Secrets Manager, WS management)
     const sensorConsumerTaskRole = new iam.Role(this, 'SensorConsumerTaskRole', {
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
-      roleName: 'msight-sensor-consumer-task-role',
+      roleName: name.sensorConsumerTaskRole,
     });
     sensorConsumerTaskRole.addToPolicy(new iam.PolicyStatement({
       actions: ['execute-api:ManageConnections'],
@@ -986,74 +1009,68 @@ export class MsightCloudStack extends cdk.Stack {
       { file: 'src/services/sensor-consumer/Dockerfile' }
     );
 
-    // One SQS FIFO queue + SNS subscription + ECS Fargate service per sensor.
-    // NOTE: the publisher must include sensor_name as a SNS MessageAttribute for filtering to work.
-    for (const sensorName of sensorNameList) {
-      const sensorQueue = new sqs.Queue(this, `SensorQueue-${sensorName}`, {
-        // Derived by a helper shared with the admin API, so the console cannot
-        // look for a queue name this stack never created.
-        queueName: sensorQueueName(sensorName),
-        fifo: true,
-        contentBasedDeduplication: true,
-        visibilityTimeout: cdk.Duration.seconds(60),
-        deduplicationScope: sqs.DeduplicationScope.MESSAGE_GROUP,
-        fifoThroughputLimit: sqs.FifoThroughputLimit.PER_MESSAGE_GROUP_ID,
-      });
+    // -------------------------
+    // Sensor consumer template
+    //
+    // Sensors are no longer provisioned here. Their queues, subscriptions and
+    // services are created at runtime from the `sensors` table in Aurora, so
+    // adding one is a console action rather than a deploy.
+    //
+    // What CDK still owns is this single task definition: the container image,
+    // CPU, memory and the environment every sensor shares. The reconciler
+    // derives per-sensor revisions from it, so that shape lives in one place
+    // instead of being restated in imperative code.
+    // -------------------------
+    const sensorTaskTemplate = new ecs.FargateTaskDefinition(this, 'SensorConsumerTaskTemplate', {
+      family: `${name.sensorResourcePrefix}-template`,
+      memoryLimitMiB: 2048,
+      cpu: 1024,
+      taskRole: sensorConsumerTaskRole,
+    });
 
-      sensorTopic.addSubscription(
-        new snsSubscriptions.SqsSubscription(sensorQueue, {
-          rawMessageDelivery: true,
-          filterPolicy: {
-            sensor_name: sns.SubscriptionFilter.stringFilter({ allowlist: [sensorName] }),
-          },
-        })
-      );
+    const sensorLogGroup = new logs.LogGroup(this, 'SensorConsumerLogGroup', {
+      logGroupName: name.sensorLogGroup('all'),
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
 
-      // Grant the ECS task role permission to consume this queue
-      sensorQueue.grantConsumeMessages(sensorConsumerTaskRole);
+    sensorTaskTemplate.addContainer('consumer', {
+      image: sensorConsumerImage,
+      environment: {
+        // SENSOR_NAME and QUEUE_URL are absent on purpose: the reconciler fills
+        // them in per sensor when it registers a revision of this definition.
+        BUILD_ID: buildId,
+        DB_HOST: proxy.endpoint,
+        DB_PORT: '5432',
+        DB_NAME: 'msight',
+        DB_SECRET_ARN: cluster.secret!.secretArn,
+        CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+        CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+        CACHE_TLS_ENABLED: 'true',
+        AWS_REGION: cdk.Stack.of(this).region,
+      },
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: 'sensor-consumer',
+        logGroup: sensorLogGroup,
+      }),
+    });
 
-      const taskDef = new ecs.FargateTaskDefinition(this, `SensorConsumerTaskDef-${sensorName}`, {
-        memoryLimitMiB: 2048,
-        cpu: 1024,
-        taskRole: sensorConsumerTaskRole,
-      });
+    sensorQueueGrantScope = `arn:${cdk.Aws.PARTITION}:sqs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:${name.sensorResourcePrefix}-*`;
 
-      taskDef.addContainer('consumer', {
-        image: sensorConsumerImage,
-        environment: {
-          SENSOR_NAME: sensorName,
-          QUEUE_URL: sensorQueue.queueUrl,
-          BUILD_ID: buildId,
-          DB_HOST: proxy.endpoint,
-          DB_PORT: '5432',
-          DB_NAME: 'msight',
-          DB_SECRET_ARN: cluster.secret!.secretArn,
-          CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
-          CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
-          CACHE_TLS_ENABLED: 'true',
-          AWS_REGION: cdk.Stack.of(this).region,
-        },
-        logging: ecs.LogDrivers.awsLogs({
-          streamPrefix: 'sensor-consumer',
-          logGroup: new logs.LogGroup(this, `SensorConsumerLogGroup-${sensorName}`, {
-            logGroupName: `/msight/sensor-consumer/${sensorName}`,
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          }),
-        }),
-      });
-
-      new ecs.FargateService(this, `SensorConsumerService-${sensorName}`, {
-        cluster: ecsCluster,
-        taskDefinition: taskDef,
-        desiredCount: 1,
-        vpcSubnets: appSubnetSelection,
-        securityGroups: [lambdaSg],
-        assignPublicIp: false,
-        circuitBreaker: { rollback: true },
-        enableExecuteCommand: true,
-      });
-    }
+    // The task role must reach any queue the reconciler may create, so the
+    // grant is by name pattern rather than per queue.
+    sensorConsumerTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'sqs:ReceiveMessage',
+          'sqs:DeleteMessage',
+          'sqs:DeleteMessageBatch',
+          'sqs:GetQueueAttributes',
+          'sqs:GetQueueUrl',
+        ],
+        resources: [sensorQueueGrantScope],
+      })
+    );
 
     // -------------------------
     // SPaT SNS consumer Lambda (Python)
@@ -1154,12 +1171,74 @@ export class MsightCloudStack extends cdk.Stack {
 
     assertMasterPasswordValid(masterPassword);
 
-    const adminAllowedOrigins = adminConsoleConfig.allowedOrigins ?? [
-      'http://localhost:5173',
+    // -------------------------
+    // Console hosting
+    //
+    // The built frontend is uploaded by deploy.js AFTER this stack finishes,
+    // because the bundle bakes in the user pool and API URL that only exist
+    // once the stack has been created. CDK therefore owns the bucket and the
+    // distribution but never the objects inside — which is why a bare
+    // `cdk deploy` leaves the console stale. Use `npm run deploy`.
+    // -------------------------
+    const consoleBucket = new s3.Bucket(this, 'AdminConsoleBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      // The bucket holds only build output, reproducible from source, so it is
+      // removed with the stack rather than left behind to be paid for.
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+
+    /**
+     * Vue Router runs in history mode, so `/sensors` is a client-side route
+     * with no object behind it. Without this, opening or refreshing any URL
+     * other than `/` returns the S3 403 that Origin Access Control produces for
+     * a missing key. Both codes are mapped: S3 answers 403 rather than 404 when
+     * the caller cannot list the bucket, which is exactly our case.
+     */
+    const spaFallbacks: cloudfront.ErrorResponse[] = [403, 404].map((httpStatus) => ({
+      httpStatus,
+      responseHttpStatus: 200,
+      responsePagePath: '/index.html',
+      ttl: cdk.Duration.seconds(0),
+    }));
+
+    const consoleDistribution = new cloudfront.Distribution(this, 'AdminConsoleDistribution', {
+      comment: `${deployment} admin console`,
+      defaultRootObject: 'index.html',
+      defaultBehavior: {
+        // withOriginAccessControl keeps the bucket private: CloudFront signs
+        // its origin requests and nothing reaches S3 directly.
+        origin: cloudfrontOrigins.S3BucketOrigin.withOriginAccessControl(consoleBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        // One behaviour for everything, with cache lifetime decided per object
+        // by the Cache-Control header deploy.js sets at upload time. A path
+        // pattern for /index.html would not do the job: a request for "/" is
+        // matched against the DEFAULT behaviour and only then resolved to
+        // index.html, so the most-visited URL would miss the pattern entirely.
+        // CACHING_OPTIMIZED honours origin Cache-Control, so no-cache on
+        // index.html and immutable on the fingerprinted assets both take effect.
+        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+      },
+      errorResponses: spaFallbacks,
+      priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
+      enableLogging: false,
+    });
+
+    const consoleUrl = `https://${consoleDistribution.distributionDomainName}`;
+
+    // The hosted console is always allowed, so its origin never has to be
+    // copied into deploy.config.yaml by hand — a step that is easy to forget
+    // and whose failure looks like a CORS bug rather than a config omission.
+    const adminAllowedOrigins = [
+      ...(adminConsoleConfig.allowedOrigins ?? ['http://localhost:5173']),
+      consoleUrl,
     ];
 
     const adminUserPool = new cognito.UserPool(this, 'MsightAdminUserPool', {
-      userPoolName: 'msight-admin-pool',
+      userPoolName: name.adminUserPool,
       selfSignUpEnabled: false,
       signInAliases: { username: true, email: true },
       standardAttributes: {
@@ -1282,7 +1361,8 @@ export class MsightCloudStack extends cdk.Stack {
         SENSOR_TOPIC_ARN: sensorTopic.topicArn,
         SPAT_TOPIC_ARN: spatTopic.topicArn,
         CONTROL_TOPIC_ARN: controlTopic.topicArn,
-        SENSOR_NAMES: sensorNameList.join(','),
+        DEPLOYMENT_NAME: deployment,
+        SENSOR_RESOURCE_PREFIX: name.sensorResourcePrefix,
         // Identifies this stack's spend in Cost Explorer.
         COST_TAG_KEY: costAllocationTagKey,
         COST_TAG_VALUE: stackTags[costAllocationTagKey],
@@ -1371,7 +1451,7 @@ export class MsightCloudStack extends cdk.Stack {
     );
 
     const adminApi = new apigwv2.HttpApi(this, 'MsightAdminApi', {
-      apiName: 'msight-admin-api',
+      apiName: name.adminApi,
       // Default authorizer, so no route can be added later that is reachable
       // without a valid console token.
       defaultAuthorizer: new HttpUserPoolAuthorizer(
@@ -1425,11 +1505,289 @@ export class MsightCloudStack extends cdk.Stack {
         // Apps whose client fleets the console can inspect. Sourced from config
         // rather than discovered, so the console never scans the keyspace.
         CLIENT_APP_IDS: ((this.node.tryGetContext('clientAppIds') ?? []) as string[]).join(','),
-        SENSOR_NAMES: sensorNameList.join(','),
+        DEPLOYMENT_NAME: deployment,
+        SENSOR_RESOURCE_PREFIX: name.sensorResourcePrefix,
+        SENSOR_TOPIC_ARN: sensorTopic.topicArn,
+        SENSOR_CLUSTER_NAME: ecsCluster.clusterName,
+        SENSOR_TASK_DEFINITION: sensorTaskTemplate.family,
+        SENSOR_SUBNET_IDS: vpc.selectSubnets(appSubnetSelection).subnetIds.join(','),
+        SENSOR_SECURITY_GROUP_IDS: lambdaSg.securityGroupId,
       },
     });
 
     cluster.secret!.grantRead(adminVpcApiLambda);
+
+    // Sensor reconciliation: creates and deletes the per-sensor queue,
+    // subscription, task definition and service.
+    //
+    // Scoped by name pattern and cluster rather than granted broadly — this is
+    // a web console holding create/delete rights on real infrastructure, and
+    // PassRole in particular is a privilege-escalation primitive, so it is
+    // conditioned to the one task role these services may assume.
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'sqs:CreateQueue',
+          'sqs:DeleteQueue',
+          'sqs:TagQueue',
+          // Ownership of a queue is read from its tags, not inferred from its
+          // name, so listing tags is on the read path of every reconcile.
+          'sqs:ListQueueTags',
+          'sqs:GetQueueUrl',
+          'sqs:GetQueueAttributes',
+          'sqs:SetQueueAttributes',
+        ],
+        resources: [sensorQueueGrantScope],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        // ListQueues cannot be scoped to a resource.
+        actions: ['sqs:ListQueues'],
+        resources: ['*'],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['sns:Subscribe', 'sns:ListSubscriptionsByTopic'],
+        resources: [sensorTopic.topicArn],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        // Unsubscribe takes a subscription ARN, and IAM defines no resource
+        // type for it — SNS supports resource-level permissions on the topic
+        // for Subscribe but not for Unsubscribe, so this cannot be narrowed.
+        // Reaching a subscription still requires listing this topic first.
+        actions: ['sns:Unsubscribe'],
+        resources: ['*'],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        // These all take a cluster parameter, which is what populates the
+        // ecs:cluster condition key. TagResource does not and is granted
+        // separately below.
+        actions: [
+          'ecs:CreateService',
+          'ecs:DeleteService',
+          'ecs:UpdateService',
+          'ecs:DescribeServices',
+          'ecs:ListServices',
+        ],
+        resources: ['*'],
+        conditions: { ArnEquals: { 'ecs:cluster': ecsCluster.clusterArn } },
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        // Task definition APIs accept no resource condition.
+        actions: ['ecs:RegisterTaskDefinition', 'ecs:DescribeTaskDefinition'],
+        resources: ['*'],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        // Tagging on create needs TagResource on the resource being created.
+        //
+        // It cannot join the cluster-conditioned statement above: TagResource's
+        // only parameter is a resource ARN, so the request carries no cluster
+        // and the ecs:cluster condition key is never populated — ArnEquals then
+        // fails closed for services as well as task definitions. Scoping by ARN
+        // is the narrowing that actually works here.
+        actions: ['ecs:TagResource'],
+        resources: [
+          `arn:${cdk.Aws.PARTITION}:ecs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:task-definition/${name.sensorResourcePrefix}-*`,
+          `arn:${cdk.Aws.PARTITION}:ecs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:service/${name.cluster}/${name.sensorResourcePrefix}-*`,
+        ],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['iam:PassRole'],
+        resources: [sensorConsumerTaskRole.roleArn, sensorTaskTemplate.executionRole!.roleArn],
+        conditions: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } },
+      })
+    );
+
+    // -------------------------
+    // Teardown reaper
+    //
+    // Sensor queues, subscriptions and services are created at runtime, so
+    // `cdk destroy` has no record of them. Without this they outlive the stack:
+    // queues billing forever, and ECS services still attached to the cluster,
+    // which makes the cluster's own deletion fail and strands the destroy.
+    //
+    // The custom resource below is deleted BEFORE the cluster and the topic —
+    // see the DependsOn wiring further down — and its Delete converges this
+    // deployment to zero sensors.
+    // -------------------------
+    const sensorReaperFn = new NodejsFunction(this, 'SensorReaperFunction', {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: path.join(__dirname, '../src/functions/sensor-reaper/handler.ts'),
+      handler: 'onEvent',
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(5),
+      // Deliberately outside the VPC: during a destroy the NAT gateway and
+      // subnets are themselves being deleted, and a VPC-attached function would
+      // be racing its own network path to reach SQS.
+      bundling: { minify: true, sourceMap: false, target: 'node22' },
+      environment: {
+        DEPLOYMENT_NAME: deployment,
+        SENSOR_RESOURCE_PREFIX: name.sensorResourcePrefix,
+        SENSOR_TOPIC_ARN: sensorTopic.topicArn,
+        SENSOR_CLUSTER_NAME: ecsCluster.clusterName,
+      },
+    });
+
+    const sensorReaperPollFn = new NodejsFunction(this, 'SensorReaperPollFunction', {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: path.join(__dirname, '../src/functions/sensor-reaper/handler.ts'),
+      handler: 'isComplete',
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(1),
+      bundling: { minify: true, sourceMap: false, target: 'node22' },
+      environment: {
+        DEPLOYMENT_NAME: deployment,
+        SENSOR_RESOURCE_PREFIX: name.sensorResourcePrefix,
+        SENSOR_TOPIC_ARN: sensorTopic.topicArn,
+        SENSOR_CLUSTER_NAME: ecsCluster.clusterName,
+      },
+    });
+
+    for (const fn of [sensorReaperFn, sensorReaperPollFn]) {
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            'sqs:DeleteQueue',
+            'sqs:GetQueueUrl',
+            'sqs:GetQueueAttributes',
+            'sqs:ListQueueTags',
+          ],
+          resources: [sensorQueueGrantScope],
+        })
+      );
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          // ListQueues cannot be scoped to a resource.
+          actions: ['sqs:ListQueues'],
+          resources: ['*'],
+        })
+      );
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['sns:ListSubscriptionsByTopic'],
+          resources: [sensorTopic.topicArn],
+        })
+      );
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['ecs:DeleteService', 'ecs:UpdateService', 'ecs:DescribeServices', 'ecs:ListServices'],
+          resources: ['*'],
+          conditions: { ArnEquals: { 'ecs:cluster': ecsCluster.clusterArn } },
+        })
+      );
+    }
+
+    // Unsubscribe takes a subscription ARN, for which IAM defines no resource
+    // type — SNS supports resource-level permissions on the topic for Subscribe
+    // but not for Unsubscribe, so this cannot be narrowed.
+    for (const fn of [sensorReaperFn, sensorReaperPollFn]) {
+      fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['sns:Unsubscribe'],
+          resources: ['*'],
+        })
+      );
+    }
+
+    // isCompleteHandler polls until the services actually reach INACTIVE.
+    // DeleteService returns immediately but leaves the service DRAINING, and
+    // CloudFormation cannot delete a cluster that still holds one — reporting
+    // success early would only move the failure downstream.
+    const sensorReaperProvider = new cr.Provider(this, 'SensorReaperProvider', {
+      onEventHandler: sensorReaperFn,
+      isCompleteHandler: sensorReaperPollFn,
+      queryInterval: cdk.Duration.seconds(15),
+      totalTimeout: cdk.Duration.minutes(30),
+      logGroup: new logs.LogGroup(this, 'SensorReaperProviderLogGroup', {
+        logGroupName: `/${name.logPrefix}/sensor-reaper`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    });
+
+    const sensorReaper = new cdk.CustomResource(this, 'SensorReaper', {
+      serviceToken: sensorReaperProvider.serviceToken,
+      properties: {
+        // Present so an operator can see which deployment a stranded resource
+        // belonged to from the CloudFormation console alone.
+        DeploymentName: deployment,
+        SensorResourcePrefix: name.sensorResourcePrefix,
+      },
+    });
+
+    // CloudFormation deletes dependents before their dependencies, so making
+    // the reaper depend on these guarantees it runs while they still exist.
+    sensorReaper.node.addDependency(ecsCluster);
+    sensorReaper.node.addDependency(sensorTopic);
+    sensorReaper.node.addDependency(sensorTaskTemplate);
+
+    // Converge once at the end of every deploy.
+    //
+    // Without this a deploy that replaced the sensor queues would leave ingest
+    // down until the 30-minute schedule happened to fire, or until someone
+    // noticed and pressed Reconcile in the console.
+    //
+    // Fired asynchronously on purpose. A synchronous invoke would make the
+    // deploy fail if reconciliation ran long — and reconciliation touching a
+    // throttled ECS API is exactly the moment a deploy should not also break.
+    // The console's drift indicator and the schedule cover a failure here.
+    const sensorReconcileOnDeploy = new cr.AwsCustomResource(this, 'SensorReconcileOnDeploy', {
+      onUpdate: {
+        service: 'Lambda',
+        action: 'Invoke',
+        parameters: {
+          FunctionName: adminVpcApiLambda.functionName,
+          InvocationType: 'Event',
+          Payload: JSON.stringify({ source: 'deploy', action: 'reconcile' }),
+        },
+        // Changes every deploy, so the reconcile runs every deploy rather than
+        // only when some other property happens to differ.
+        physicalResourceId: cr.PhysicalResourceId.of(`sensor-reconcile-${buildId}`),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [adminVpcApiLambda.functionArn],
+        }),
+      ]),
+      installLatestAwsSdk: false,
+    });
+
+    // Reconciling before the task template exists would register a revision of
+    // nothing.
+    sensorReconcileOnDeploy.node.addDependency(sensorTaskTemplate);
+    sensorReconcileOnDeploy.node.addDependency(ecsCluster);
+
+    // Drift and partial failures converge on their own rather than waiting for
+    // someone to notice: a create that half-succeeded is retried here.
+    //
+    // Five minutes rather than something longer because this is also the safety
+    // net for two cases the deploy-time trigger above cannot cover. CloudFormation
+    // deletes replaced resources *after* the update phase, so a deploy that
+    // replaces the sensor queues runs the reconcile before they are gone; and SQS
+    // refuses to recreate a queue within 60 seconds of its deletion. Both resolve
+    // on the next tick, so the tick interval is the worst-case ingest gap.
+    new events.Rule(this, 'SensorReconcileSchedule', {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      targets: [
+        new eventsTargets.LambdaFunction(adminVpcApiLambda, {
+          event: events.RuleTargetInput.fromObject({ source: 'schedule', action: 'reconcile' }),
+        }),
+      ],
+    });
+
 
     const adminVpcIntegration = new HttpLambdaIntegration(
       'AdminVpcApiIntegration',
@@ -1439,7 +1797,7 @@ export class MsightCloudStack extends cdk.Stack {
     // More specific than the catch-all below, so API Gateway prefers these.
     // Both the bare prefix and its children are needed — a greedy path variable
     // does not match the prefix on its own.
-    for (const prefix of ['clients', 'db', 'maps']) {
+    for (const prefix of ['clients', 'db', 'maps', 'sensors']) {
       for (const routePath of [`/v1/admin/${prefix}`, `/v1/admin/${prefix}/{proxy+}`]) {
         adminApi.addRoutes({
           path: routePath,
@@ -1514,7 +1872,7 @@ export class MsightCloudStack extends cdk.Stack {
 
     for (const { id, stage } of apiStages) {
       const accessLogGroup = new logs.LogGroup(this, `${id}AccessLogs`, {
-        logGroupName: `/msight/apigw/${id}`,
+        logGroupName: name.apiAccessLogGroup(id),
         retention: logs.RetentionDays.ONE_WEEK,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       });
@@ -1539,6 +1897,21 @@ export class MsightCloudStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AdminUserPoolClientId', {
       value: adminUserPoolClient.userPoolClientId,
       description: 'Cognito app client ID for the management console frontend.',
+    });
+
+    new cdk.CfnOutput(this, 'AdminConsoleUrl', {
+      value: consoleUrl,
+      description: 'Open the management console here (populated by npm run deploy).',
+    });
+
+    new cdk.CfnOutput(this, 'AdminConsoleBucketName', {
+      value: consoleBucket.bucketName,
+      description: 'Bucket the built console is uploaded to. Used by deploy.js.',
+    });
+
+    new cdk.CfnOutput(this, 'AdminConsoleDistributionId', {
+      value: consoleDistribution.distributionId,
+      description: 'CloudFront distribution to invalidate after upload. Used by deploy.js.',
     });
 
     if (cacheDebugLambda) {

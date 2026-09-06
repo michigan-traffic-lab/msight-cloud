@@ -16,7 +16,6 @@ const config = yaml.load(fs.readFileSync(configPath, 'utf8')) as Record<string, 
 
 const app = new cdk.App({
   context: {
-    sensors:              config['sensors']              ?? [],
     debugMode:            config['debugMode']            ?? false,
     preferredAz:          config['preferredAz']          ?? '',
     spatBroadcastRadiusM: config['spatBroadcastRadiusM'] ?? 500,
@@ -24,6 +23,8 @@ const app = new cdk.App({
     tags:                 config['tags']                 ?? {},
     costAllocationTagKey: config['costAllocationTagKey'] ?? 'Project',
     clientAppIds:         config['clientAppIds']         ?? [],
+    deploymentName:       config['deploymentName']       ?? 'msight-cloud',
+    resourceNames:        config['resourceNames']        ?? {},
   },
 });
 

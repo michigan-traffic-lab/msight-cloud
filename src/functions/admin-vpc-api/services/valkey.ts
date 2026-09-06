@@ -3,6 +3,7 @@ import {
   ValkeyKeyResponseSchema,
   ValkeyOverviewResponseSchema,
 } from '../../../shared/schemas/admin';
+import { listSensors } from './sensor-registry';
 import { HttpError } from '../../../shared/admin-api/http';
 
 const ZONE_ID = 'zone01';
@@ -54,11 +55,13 @@ function configuredApps(): string[] {
     .filter(Boolean);
 }
 
-function configuredSensors(): string[] {
-  return (process.env.SENSOR_NAMES ?? '')
-    .split(',')
-    .map((name) => name.trim())
-    .filter(Boolean);
+/**
+ * Sensor names come from the registry, which is the same table the reconciler
+ * builds infrastructure from. Reading them from deploy config instead would
+ * make this page silently blind to any sensor added from the console.
+ */
+async function registeredSensors(): Promise<string[]> {
+  return (await listSensors()).map((row) => row.name);
 }
 
 /** Parses the flat `field:value` text that INFO returns. */
@@ -74,8 +77,8 @@ function parseInfo(raw: string | null): Record<string, string> {
 
 /**
  * The values worth putting on a dashboard, assembled from keys we can name
- * without scanning: app IDs and sensor names both come from configuration, so
- * every key below is constructed rather than discovered.
+ * without scanning: app IDs come from configuration and sensor names from the
+ * registry, so every key below is constructed rather than discovered.
  */
 export async function getOverview() {
   const [infoRaw, dbSize] = await Promise.all([
@@ -88,7 +91,7 @@ export async function getOverview() {
   const misses = Number(info.keyspace_misses ?? 0);
 
   const apps = configuredApps();
-  const sensors = configuredSensors();
+  const sensors = await registeredSensors();
   const now = Math.floor(Date.now() / 1000);
 
   const appRows = await Promise.all(

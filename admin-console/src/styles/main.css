@@ -162,3 +162,14 @@ body {
   font-size: 13px;
   padding: 8px 0;
 }
+
+/*
+ * Tooltip bodies used for explanations rather than one-word labels. Element
+ * Plus puts no cap on popper width, so a two-sentence hint would otherwise
+ * render as a single line running the width of the screen.
+ */
+.hint-popper.el-popper {
+  max-width: 340px;
+  line-height: 1.6;
+  font-size: 12.5px;
+}

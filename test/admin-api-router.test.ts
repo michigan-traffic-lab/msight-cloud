@@ -4,7 +4,7 @@ import { Router, runMiddleware } from '../src/shared/admin-api/router';
 import { authenticate, parseGroups, resolveRole } from '../src/shared/admin-api/middleware/auth';
 import { requireRole } from '../src/shared/admin-api/middleware/require-role';
 import { buildRouter } from '../src/functions/admin-api/routes';
-import { sensorQueueName } from '../src/shared/sensor-naming';
+import { sensorQueueName } from '../src/shared/deployment-naming';
 import { buildVpcRouter } from '../src/functions/admin-vpc-api/routes';
 
 function makeEvent(groups: unknown, username = 'alice'): APIGatewayProxyEventV2WithJWTAuthorizer {
@@ -205,7 +205,6 @@ describe('buildRouter', () => {
         'GET /v1/admin/cost/summary',
         'GET /v1/admin/cost/service',
         'GET /v1/admin/network/topology',
-        'GET /v1/admin/sensors',
         'GET /v1/admin/logs/groups',
         'POST /v1/admin/logs/query',
         'GET /v1/admin/logs/query/:queryId',
@@ -272,10 +271,15 @@ describe('sensor queue naming', () => {
   // If it changes, the console starts reporting correctly-wired sensors as
   // missing, so the mapping is pinned here.
   it('matches the names the stack creates', () => {
-    expect(sensorQueueName('derq_huronPkwy_plymouth')).toBe(
+    // The pinned prefix this deployment already uses.
+    expect(sensorQueueName('msight-sensor', 'derq_huronPkwy_plymouth')).toBe(
       'msight-sensor-derq-huronpkwy-plymouth.fifo'
     );
-    expect(sensorQueueName('simple')).toBe('msight-sensor-simple.fifo');
+    // A second deployment gets a different prefix, which is what makes two
+    // stacks in one account possible at all.
+    expect(sensorQueueName('msight-dev-sensor', 'simple')).toBe(
+      'msight-dev-sensor-simple.fifo'
+    );
   });
 });
 
@@ -303,6 +307,11 @@ describe('in-VPC admin router', () => {
         'DELETE /v1/admin/db/valkey/key',
         'GET /v1/admin/maps',
         'GET /v1/admin/maps/:name',
+        'GET /v1/admin/sensors',
+        'POST /v1/admin/sensors',
+        'POST /v1/admin/sensors/reconcile',
+        'POST /v1/admin/sensors/:name/enabled',
+        'DELETE /v1/admin/sensors/:name',
       ].sort()
     );
   });
@@ -415,5 +424,53 @@ describe('map routes', () => {
     const ctx = makeContext('GET', '/v1/admin/maps', { groups: '[viewer]' });
     await runMiddleware([authenticate], ctx, async () => ok({}));
     await expect(buildVpcRouter('v1').dispatch(ctx)).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+describe('sensor routes', () => {
+  // Reading the registry is onboarding information and open to any signed-in
+  // user. Everything that changes it creates or destroys real infrastructure
+  // and discards queued messages, so it is admin-only. This pins that split.
+  it('leaves reads open to a viewer', async () => {
+    const router = buildVpcRouter('v1');
+    const ctx = makeContext('GET', '/v1/admin/sensors', { groups: '[viewer]' });
+    await runMiddleware([authenticate], ctx, async () => ok({}));
+
+    // The handler itself needs AWS, so reaching it at all is the assertion:
+    // a role rejection would surface as a 403 before any call is attempted.
+    await expect(router.dispatch(ctx)).rejects.not.toMatchObject({ status: 403 });
+  });
+
+  it('gates every mutation behind the admin role', async () => {
+    const router = buildVpcRouter('v1');
+    const mutations: Array<[string, string]> = [
+      ['POST', '/v1/admin/sensors'],
+      ['POST', '/v1/admin/sensors/cam_1/enabled'],
+      ['DELETE', '/v1/admin/sensors/cam_1'],
+      ['POST', '/v1/admin/sensors/reconcile'],
+    ];
+
+    for (const [method, path] of mutations) {
+      const ctx = makeContext(method, path, { groups: '[operator]' });
+      await runMiddleware([authenticate], ctx, async () => ok({}));
+      await expect(router.dispatch(ctx)).rejects.toMatchObject({
+        status: 403,
+        code: 'forbidden',
+      });
+    }
+  });
+
+  it('prefers the literal reconcile route over the :name parameter', async () => {
+    // `POST /sensors/reconcile` and `POST /sensors/:name/enabled` do not
+    // collide, but `POST /sensors/reconcile` would be shadowed by a
+    // hypothetical `POST /sensors/:name`. Matching order is what keeps
+    // Reconcile from being read as a sensor named "reconcile".
+    const router = buildVpcRouter('v1');
+    const ctx = makeContext('POST', '/v1/admin/sensors/reconcile', { groups: '[admin]' });
+    await runMiddleware([authenticate], ctx, async () => ok({}));
+
+    // Admin passes the role gate, so failure now comes from the AWS call the
+    // reconcile handler makes — not from a 404 or a 405.
+    await expect(router.dispatch(ctx)).rejects.not.toMatchObject({ status: 404 });
   });
 });

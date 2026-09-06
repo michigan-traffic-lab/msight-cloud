@@ -63,7 +63,7 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
         icon: 'Cpu',
         minRole: 'viewer',
         subtitle:
-          'Configured sensors, their ingest queues, and how to connect a field device to the topic.',
+          'Register sensors, watch their ingest queues, and connect a field device to the topic.',
         status: 'ready',
         component: () => import('@/views/SensorsView.vue'),
       },

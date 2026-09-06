@@ -36,10 +36,6 @@ export interface SystemInfo {
     spat: string | null;
     control: string | null;
   };
-  sensors: {
-    configured_count: number;
-    names: string[];
-  };
 }
 
 export interface CostPeriod {
@@ -269,26 +265,41 @@ export interface LiveClientsQuery {
 
 export interface SensorEntry {
   name: string;
-  queue: {
-    name: string;
-    url: string;
-    arn: string;
-    messages_available: number;
-    messages_in_flight: number;
-  } | null;
-  subscription: { arn: string; values: string[] } | null;
-  wired: boolean;
+  display_name: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  queue_name: string;
+  /** Actual infrastructure state, not what the registry asks for. */
+  queue_exists: boolean;
+  service_exists: boolean;
+  messages_available: number | null;
+  messages_in_flight: number | null;
+}
+
+export interface ReconcileAction {
+  sensor: string;
+  action: 'create' | 'delete' | 'none';
+  steps: string[];
+  error: string | null;
+}
+
+export interface ReconcileResult {
+  desired: string[];
+  created: string[];
+  deleted: string[];
+  actions: ReconcileAction[];
+  failed: number;
+  reconciled_at: string;
 }
 
 export interface SensorsResponse {
-  topic: {
-    arn: string;
-    name: string;
-    fifo: boolean;
-    routing_attribute: string;
-    content_based_deduplication: boolean;
-  };
   sensors: SensorEntry[];
+  /** Queues with no registry row — removed rows, or a half-failed reconcile. */
+  orphaned_queues: string[];
+  topic_arn: string;
+  routing_attribute: string;
+  cluster: string;
   fetched_at: string;
 }
 
@@ -566,6 +577,27 @@ export const api = {
 
   sensors: (signal?: AbortSignal) =>
     request<SensorsResponse>('GET', '/v1/admin/sensors', undefined, signal),
+
+  sensorAdd: (name: string, displayName: string | null) =>
+    request<{ reconcile: ReconcileResult }>('POST', '/v1/admin/sensors', {
+      name,
+      display_name: displayName,
+    }),
+
+  sensorSetEnabled: (name: string, enabled: boolean) =>
+    request<{ reconcile: ReconcileResult }>(
+      'POST',
+      `/v1/admin/sensors/${encodeURIComponent(name)}/enabled`,
+      { enabled }
+    ),
+
+  sensorRemove: (name: string) =>
+    request<{ reconcile: ReconcileResult }>(
+      'DELETE',
+      `/v1/admin/sensors/${encodeURIComponent(name)}`
+    ),
+
+  sensorReconcile: () => request<ReconcileResult>('POST', '/v1/admin/sensors/reconcile'),
 
   networkTopology: (refresh = false, signal?: AbortSignal) =>
     request<NetworkTopology>(

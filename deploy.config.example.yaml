@@ -15,13 +15,6 @@ preferredAz: ""
 # debugMode: true deploys an extra cache-debug Lambda endpoint.
 debugMode: false
 
-# ── Sensor list ───────────────────────────────────────────────────────────────
-# One SQS FIFO queue + ECS Fargate service is created per entry.
-# Names must match the sensor_name attribute published to the SNS topic.
-sensors:
-  - sensor_name_1
-  - sensor_name_2
-
 # ── SPaT broadcast ────────────────────────────────────────────────────────────
 # Radius (metres) used when fanning out SPaT messages to nearby WebSocket clients.
 spatBroadcastRadiusM: 500
@@ -64,8 +57,9 @@ adminConsole:
   masterUsername: admin
   masterEmail: you@example.com
   masterPassword: "ChangeMe!2026"
-  # Origins allowed to call the admin API. Add the console's deployed origin
-  # here once it is hosted; the Vite dev server default is below.
+  # Extra origins allowed to call the admin API. The hosted console's own
+  # CloudFront URL is added automatically, so this is only for local dev
+  # servers and any other front end you point at this API.
   allowedOrigins:
     - http://localhost:5173
 
@@ -75,3 +69,44 @@ adminConsole:
 # to find out which apps exist.
 clientAppIds:
   - app_demo
+
+# ── Deployment identity ───────────────────────────────────────────────────────
+# Names every resource this stack creates and identifies it in tags.
+#
+# Two things depend on it:
+#   - SQS, SNS, ECS cluster and IAM role names are unique per AWS account. A
+#     fixed name means a second MSight deployment cannot be created at all.
+#   - Sensor queues and services are created at runtime, so teardown finds them
+#     by tag. That tag must name the deployment, or destroying one stack would
+#     reap another's queues.
+#
+# 3-24 characters, lowercase letters, digits and hyphens, starting with a letter.
+# Changing it on an existing stack REPLACES the named resources — run
+# `cdk diff` first.
+deploymentName: msight-cloud
+
+# ── Resource names ────────────────────────────────────────────────────────────
+# Pins the names of resources whose rename would REPLACE them.
+#
+# Renaming an SNS topic changes its ARN, and every field sensor publishing to
+# the old ARN goes silent with no error raised. Renaming the ECS cluster, the
+# task role or a queue rebuilds them and discards in-flight messages. So an
+# existing deployment pins the names it already has.
+#
+# Omit this whole block on a NEW deployment: every name then defaults to
+# `<deploymentName>-...`, which is what lets two MSight stacks coexist in one
+# AWS account. Only pin names when you are adopting resources that already
+# exist.
+#
+# API Gateway and the Cognito user pool are absent on purpose — those rename in
+# place, so their URLs and user accounts survive a change.
+resourceNames:
+  sensorTopic: msight-sensor-topic.fifo
+  spatTopic: msight-spat-topic
+  controlTopic: msight-control-topic
+  cluster: msight-cluster
+  sensorConsumerTaskRole: msight-sensor-consumer-task-role
+  # Per-sensor queues and services are named <prefix>-<sensor>.
+  sensorResourcePrefix: msight-sensor
+  # CloudWatch log groups are named /<prefix>/...
+  logPrefix: msight

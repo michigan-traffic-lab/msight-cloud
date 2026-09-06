@@ -26,6 +26,11 @@ const HEALTH_ENDPOINTS = [
 
 const info = useAsyncValue((signal) => api.systemInfo(signal), { timeoutMs: 15000 });
 
+// Sensors live in Aurora, not in the stack's environment, so this is its own
+// call rather than a field on systemInfo — and its own card can fail or time
+// out without taking the rest of the overview with it.
+const sensors = useAsyncValue((signal) => api.sensors(signal), { timeoutMs: 20000 });
+
 /** Base URL of the public API, known only once system info has loaded. */
 const publicBase = computed(() => info.data.value?.endpoints.http_api ?? null);
 
@@ -65,7 +70,11 @@ watch(
 const healthLoading = computed(() => health.some((row) => row.probe.state.value === 'loading'));
 
 const anyLoading = computed(
-  () => info.state.value === 'loading' || latency.state.value === 'loading' || healthLoading.value
+  () =>
+    info.state.value === 'loading' ||
+    latency.state.value === 'loading' ||
+    sensors.state.value === 'loading' ||
+    healthLoading.value
 );
 
 /** Re-runs every endpoint check; each still loads on its own request. */
@@ -76,6 +85,7 @@ function reloadHealth() {
 function reloadAll() {
   void info.reload();
   void latency.reload();
+  void sensors.reload();
   reloadHealth();
 }
 
@@ -135,10 +145,13 @@ async function copyValue(value: string | null, label: string) {
         </div>
       </div>
       <div class="stat">
-        <div class="stat__label">Configured sensors</div>
+        <div class="stat__label">Sensors</div>
         <div class="stat__value">
-          <AsyncValue :state="info.state.value" :error="info.error.value">
-            {{ info.data.value?.sensors.configured_count }}
+          <AsyncValue :state="sensors.state.value" :error="sensors.error.value">
+            {{ sensors.data.value?.sensors.filter((s) => s.enabled).length ?? 0 }}
+            <span class="stat__suffix">
+              of {{ sensors.data.value?.sensors.length ?? 0 }} enabled
+            </span>
           </AsyncValue>
         </div>
       </div>
@@ -314,23 +327,25 @@ async function copyValue(value: string | null, label: string) {
 
       <section class="card">
         <h2 class="card__title">Sensors</h2>
-        <AsyncValue :state="info.state.value" :error="info.error.value">
-          <div v-if="(info.data.value?.sensors.names.length ?? 0) === 0" class="empty">
-            No sensors are configured in deploy.config.yaml.
+        <AsyncValue :state="sensors.state.value" :error="sensors.error.value">
+          <div v-if="(sensors.data.value?.sensors.length ?? 0) === 0" class="empty">
+            No sensors are registered yet. Add one from the Sensors tab.
           </div>
           <div v-else class="tags">
             <el-tag
-              v-for="name in info.data.value?.sensors.names"
-              :key="name"
+              v-for="sensor in sensors.data.value?.sensors"
+              :key="sensor.name"
               size="large"
               effect="plain"
+              :type="sensor.enabled ? undefined : 'info'"
             >
-              {{ name }}
+              {{ sensor.display_name || sensor.name }}
             </el-tag>
           </div>
           <p class="note">
-            Sensors are provisioned at deploy time — each one creates an SQS FIFO queue and an
-            ECS service. Adding one is a <code>cdk deploy</code>, not a console action.
+            Sensors are registered in the console, not in deploy config. Adding one creates its
+            SQS FIFO queue, topic subscription and ECS service within a few minutes — no
+            <code>cdk deploy</code>.
           </p>
         </AsyncValue>
       </section>
@@ -512,5 +527,11 @@ async function copyValue(value: string | null, label: string) {
   margin-top: 20px;
   font-size: 12px;
   color: var(--text-muted);
+}
+.stat__suffix {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-left: 4px;
 }
 </style>

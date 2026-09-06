@@ -90,10 +90,6 @@ export const SystemInfoResponseSchema = z.object({
     spat: z.string().nullable(),
     control: z.string().nullable(),
   }),
-  sensors: z.object({
-    configured_count: z.number(),
-    names: z.array(z.string()),
-  }),
 });
 
 const LiveClientSchema = z.object({
