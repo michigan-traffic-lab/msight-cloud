@@ -1,0 +1,196 @@
+/*
+ * Almost everything the old console did with custom CSS is now a Quasar
+ * component or utility class:
+ *
+ *   .card / .card__title  -> <q-card> + <q-card-section> + text-* typography
+ *   .stat-grid            -> <div class="row q-col-gutter-md">
+ *   .kv                   -> <q-list> / <q-item> or <q-markup-table>
+ *   .header               -> row items-start justify-between
+ *   spacing               -> q-pa-*, q-mb-*, q-gutter-*
+ *   colours               -> text-*, bg-*, and the brand palette in
+ *                            quasar.variables.scss + quasar.config
+ *
+ * What is left here is only what Quasar has no opinion about: the drawer's
+ * University of Michigan palette, and two small helpers.
+ */
+
+// U-M maize. Used for the active navigation item against the blue drawer.
+// Maize is far too light to carry white text, so the active row flips to navy
+// ink rather than inheriting the drawer's white.
+$umich-maize: #ffcb05;
+$umich-blue: #00274c;
+
+// Identifiers, ARNs and queue names, which must not be confused with prose and
+// need to wrap rather than widen the page.
+.mono {
+  font-family: 'SF Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+// Explanatory tooltips run to a sentence or two. Quasar puts no cap on tooltip
+// width, so without this a hint renders as one line the width of the screen.
+// Global because tooltips render in a portal outside the component tree.
+.hint-tooltip {
+  max-width: 340px;
+  line-height: 1.6;
+  font-size: 12.5px;
+}
+
+/*
+ * Tokens for the hand-drawn SVG diagrams (CostDonut, IntersectionDiagram,
+ * NetworkDiagram).
+ *
+ * Quasar has no charting components, so those stay custom SVG — and `fill` and
+ * `stroke` need real colour values, which a utility class like `text-grey-7`
+ * cannot supply. These deliberately mirror Quasar's own palette so the diagrams
+ * sit with the rest of the UI instead of drifting from it.
+ *
+ * Nothing else should use these: pages use Quasar components and utilities.
+ */
+:root {
+  --text: #{$dark};
+  --text-muted: #{$grey-7};
+  --border: #{$grey-4};
+  --card-bg: #fff;
+  --page-bg: #{$grey-2};
+  --accent: #{$secondary};
+  --radius: 8px;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* ---- Shared surface treatment -------------------------------------------
+
+   Quasar's bordered card is a 1px line and nothing else, which on a grey page
+   reads as flat. A soft shadow and a slightly larger radius give the cards
+   enough separation to be scannable without turning the page into a stack of
+   heavy boxes. Applied globally so a card written without SectionCard still
+   matches the ones that use it. */
+
+.q-card--bordered {
+  border-color: #e6e9f0;
+  box-shadow:
+    0 1px 2px rgba(16, 24, 40, 0.04),
+    0 4px 14px rgba(16, 24, 40, 0.05);
+}
+
+/* Tables sit inside cards that already draw a border, so their own outline is
+   a doubled line. */
+.q-card .q-table--bordered {
+  border: 0;
+}
+
+/* A table with more columns than fit must scroll inside its own box, rather
+   than be clipped at the card's edge. */
+.q-table__middle {
+  overflow: auto;
+}
+
+/*
+ * A visible scrollbar on scrollable regions.
+ *
+ * Overlay scrollbars only appear once you already started scrolling, which is
+ * no help when the question is whether there is anything to scroll to. A thin
+ * always-visible track is the only affordance that a wide table has more
+ * columns off to the right.
+ */
+.q-table__middle::-webkit-scrollbar,
+.scroll-x::-webkit-scrollbar {
+  height: 9px;
+  width: 9px;
+}
+
+.q-table__middle::-webkit-scrollbar-track,
+.scroll-x::-webkit-scrollbar-track {
+  background: #f1f3f7;
+}
+
+.q-table__middle::-webkit-scrollbar-thumb,
+.scroll-x::-webkit-scrollbar-thumb {
+  background: #c8cfdb;
+  border-radius: 5px;
+}
+
+.q-table__middle::-webkit-scrollbar-thumb:hover,
+.scroll-x::-webkit-scrollbar-thumb:hover {
+  background: #a8b2c2;
+}
+
+/* Firefox has no pseudo-elements for this. */
+.q-table__middle,
+.scroll-x {
+  scrollbar-width: thin;
+  scrollbar-color: #c8cfdb #f1f3f7;
+}
+
+.q-table thead th {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #6b7688;
+  background: #fafbfd;
+}
+
+/* Banners are used for warnings and explanations, not decoration, so they get
+   a readable measure rather than running the full width of a wide screen. */
+.q-banner {
+  line-height: 1.6;
+}
+
+/* Wide content scrolls inside its own box rather than widening the page. */
+.scroll-x {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* An ordered list of instructions, used by the sensor hookup guide. */
+.steps-list {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+
+.steps-list li + li {
+  margin-top: 8px;
+}
+
+/* Inline code in prose. */
+code {
+  background: rgba(16, 24, 40, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: 'SF Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+/* ---- Buttons -------------------------------------------------------------
+
+   Quasar uppercases button labels by default. At small sizes that reads as
+   shouty and, worse, makes short labels ("Schema", "Next") lose their word
+   shape — which is most of why the small buttons looked wrong. Sentence case
+   throughout, with a consistent height so a row of buttons lines up. */
+
+.q-btn {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 550;
+}
+
+.q-btn--outline .q-btn__content,
+.q-btn--standard .q-btn__content {
+  font-size: 13px;
+}
+
+/* Small buttons were the ragged ones: Quasar's dense padding leaves them
+   noticeably shorter than the inputs and chips they sit beside. */
+.q-btn--dense.q-btn--outline,
+.q-btn--dense.q-btn--unelevated {
+  min-height: 30px;
+  padding: 0 11px;
+}
+
+.q-btn--dense.q-btn--outline .q-btn__content,
+.q-btn--dense.q-btn--unelevated .q-btn__content {
+  font-size: 12.5px;
+}

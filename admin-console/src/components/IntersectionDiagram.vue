@@ -55,7 +55,7 @@ function project(x: number, y: number) {
 const rendered = computed(() =>
   props.lanes
     .filter((lane) => lane.points.length > 0)
-    .map((lane) => {
+    .flatMap((lane) => {
       // Lanes start at refPoint; deltas are cumulative from there.
       const path = [{ x: 0, y: 0 }, ...lane.points]
         .map((point) => {
@@ -64,19 +64,26 @@ const rendered = computed(() =>
         })
         .join(' ');
 
-      const last = lane.points[lane.points.length - 1];
-      const previous = lane.points.length > 1 ? lane.points[lane.points.length - 2] : { x: 0, y: 0 };
+      // The filter above already guarantees at least one point, but TypeScript
+      // cannot carry that through, and indexing yields `T | undefined` under
+      // noUncheckedIndexedAccess. Narrowed explicitly rather than asserted, so
+      // the guarantee stays checked if that filter is ever changed.
+      const last = lane.points.at(-1);
+      if (last === undefined) return [];
+      const previous = lane.points.at(-2) ?? { x: 0, y: 0 };
       const end = project(last.x, last.y);
       const angle = (Math.atan2(-(last.y - previous.y), last.x - previous.x) * 180) / Math.PI;
 
-      return {
-        lane,
-        path,
-        end,
-        angle,
-        color: DIRECTION_COLOR[lane.direction] ?? DIRECTION_COLOR.unknown,
-        isCrosswalk: lane.kind === 'crosswalk',
-      };
+      return [
+        {
+          lane,
+          path,
+          end,
+          angle,
+          color: DIRECTION_COLOR[lane.direction] ?? DIRECTION_COLOR.unknown,
+          isCrosswalk: lane.kind === 'crosswalk',
+        },
+      ];
     })
 );
 

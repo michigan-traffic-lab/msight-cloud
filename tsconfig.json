@@ -30,6 +30,7 @@
   "exclude": [
     "node_modules",
     "cdk.out",
-    "admin-console"
+    "admin-console",
+    "admin-console-old"
   ]
 }

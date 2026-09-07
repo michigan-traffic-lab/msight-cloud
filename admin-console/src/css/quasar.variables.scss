@@ -1,0 +1,21 @@
+// Quasar SCSS brand variables.
+//
+// These mirror `framework.config.brand` in quasar.config.ts. Both are needed:
+// the config values are injected as CSS custom properties at runtime for
+// component props like `color="primary"`, while these SCSS variables are what
+// Quasar's own stylesheets compile against.
+//
+// University of Michigan blue and maize. The MSight logo already carries maize,
+// so this is the official pairing rather than an invented palette.
+
+$primary: #00274c; // U-M blue
+$secondary: #00558c; // readable accent on light surfaces
+$accent: #ffcb05; // U-M maize
+
+$dark: #1c2434;
+$dark-page: #121821;
+
+$positive: #12b76a;
+$negative: #f04438;
+$info: #00558c;
+$warning: #f79009;

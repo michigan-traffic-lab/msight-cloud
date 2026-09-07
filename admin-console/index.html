@@ -1,13 +1,39 @@
 <!doctype html>
-<html lang="en">
+<html>
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" type="image/png" href="/favicon.png" />
-    <title>MSight Cloud — Management Console</title>
+    <title><%= productName %></title>
+
+    <meta charset="utf-8">
+    <meta name="description" content="<%= productDescription %>">
+    <meta name="format-detection" content="telephone=no">
+    <meta name="msapplication-tap-highlight" content="no">
+    <meta name="viewport" content="width=device-width, initial-scale=1<% if (ctx.mode.cordova || ctx.mode.capacitor) { %>, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover<% } %>">
+    <!--
+      The scaffold ships connect-src 'self', which blocks every call this
+      console makes: the admin API on execute-api and sign-in on cognito-idp are
+      both cross-origin. Widened to AWS hosts rather than dropped, so the policy
+      still stops the page talking to anywhere else.
+
+      In dev the HMR socket is allowed on any host, not just localhost —
+      `quasar dev` also serves on the LAN address, and pinning it to localhost
+      breaks hot reload when the console is opened from a phone.
+
+      Note the dev additions are inside the single connect-src value, not a
+      second directive: a repeated CSP directive is ignored by the browser, so
+      splitting them would silently drop the websocket permission.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; worker-src 'self' blob:; connect-src 'self' https://*.amazonaws.com<% if (ctx.dev) { %> ws: wss:<% } %>;"
+    />
+
+    <link rel="icon" type="image/png" sizes="128x128" href="icons/favicon-128x128.png">
+    <link rel="icon" type="image/png" sizes="96x96" href="icons/favicon-96x96.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16x16.png">
+    <link rel="icon" type="image/ico" href="favicon.ico">
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <!-- quasar:entry-point -->
   </body>
 </html>

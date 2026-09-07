@@ -393,14 +393,18 @@ async function request<T>(
     throw new ApiError(401, 'not_signed_in', 'Your session has expired. Sign in again.');
   }
 
+  // body and signal are spread in only when present rather than set to
+  // undefined: RequestInit types them as `BodyInit | null` and
+  // `AbortSignal | null`, which under exactOptionalPropertyTypes reject an
+  // explicit undefined.
   const response = await fetch(`${config.adminApiUrl}${path}`, {
     method,
     headers: {
       authorization: `Bearer ${token}`,
       ...(body === undefined ? {} : { 'content-type': 'application/json' }),
     },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    ...(signal ? { signal } : {}),
   });
 
   const text = await response.text();

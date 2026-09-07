@@ -52,7 +52,13 @@ async function timedFetch(url: string, signal?: AbortSignal) {
   // performance.now() is monotonic, so a clock adjustment mid-request cannot
   // produce a negative or wildly wrong duration.
   const startedAt = performance.now();
-  const response = await fetch(url, { signal, cache: 'no-store' });
+  // The key is omitted rather than set to undefined: RequestInit types signal
+  // as `AbortSignal | null`, which under exactOptionalPropertyTypes does not
+  // accept an explicit undefined.
+  const response = await fetch(url, {
+    ...(signal ? { signal } : {}),
+    cache: 'no-store',
+  });
   const elapsed = performance.now() - startedAt;
   return { response, elapsed };
 }

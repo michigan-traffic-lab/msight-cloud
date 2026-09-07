@@ -5,29 +5,27 @@
  * The console shows numbers whose meaning is not self-evident — "out of sync"
  * and "messages waiting" both describe infrastructure state a reader cannot
  * infer from the label. Putting the explanation behind a hover keeps the
- * dashboard scannable while still making it answerable without leaving the
- * page.
+ * dashboard scannable while still making it answerable without leaving the page.
  */
-defineProps<{
-  /** Plain text, rendered as text — kept short enough to read in one pass. */
-  text: string;
-  placement?: 'top' | 'right' | 'bottom' | 'left';
-}>();
+withDefaults(
+  defineProps<{
+    /** Plain text, rendered as text — kept short enough to read in one pass. */
+    text: string;
+    anchor?: 'top middle' | 'bottom middle' | 'center right' | 'center left';
+  }>(),
+  { anchor: 'top middle' }
+);
 </script>
 
 <template>
-  <el-tooltip
-    :content="text"
-    :placement="placement ?? 'top'"
-    effect="dark"
-    :show-after="120"
-    popper-class="hint-popper"
-  >
-    <!-- tabindex so the hint is reachable without a pointer. -->
-    <span class="hint-icon" tabindex="0" role="note" :aria-label="text">
-      <el-icon><InfoFilled /></el-icon>
-    </span>
-  </el-tooltip>
+  <!-- tabindex so the hint is reachable without a pointer; QTooltip shows on
+       focus as well as hover. -->
+  <span class="hint-icon text-grey-6" tabindex="0" role="note" :aria-label="text">
+    <q-icon name="info" size="13px" />
+    <q-tooltip class="hint-tooltip" :anchor="anchor" self="center middle" :delay="120">
+      {{ text }}
+    </q-tooltip>
+  </span>
 </template>
 
 <style scoped>
@@ -35,8 +33,7 @@ defineProps<{
   display: inline-flex;
   align-items: center;
   margin-left: 5px;
-  color: var(--text-muted);
-  opacity: 0.55;
+  opacity: 0.6;
   cursor: help;
   vertical-align: middle;
   outline: none;
@@ -46,9 +43,5 @@ defineProps<{
 .hint-icon:hover,
 .hint-icon:focus-visible {
   opacity: 1;
-}
-
-.hint-icon .el-icon {
-  font-size: 12.5px;
 }
 </style>

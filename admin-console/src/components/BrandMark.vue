@@ -62,7 +62,7 @@ const LOGO_URL = '/logo.png';
   align-items: center;
   justify-content: center;
   border-radius: 10px;
-  background: var(--brand);
+  background: #f7b71d; /* MSight amber, matching the mark */
   color: #1a1a19;
   font-weight: 800;
   letter-spacing: -0.02em;

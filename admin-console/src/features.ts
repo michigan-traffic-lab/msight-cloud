@@ -18,7 +18,7 @@ export interface FeatureDef {
   label: string;
   /** Heading shown on the page and in the top bar. */
   title: string;
-  /** Element Plus icon component name. */
+  /** Material Icons name, from Quasar's default icon set. */
   icon: string;
   /** Minimum role required to see and open the page. */
   minRole: AdminRole;
@@ -38,7 +38,7 @@ export interface FeatureGroup {
   features: FeatureDef[];
 }
 
-const placeholder = () => import('@/views/PlaceholderView.vue');
+const placeholder = () => import('@/pages/PlaceholderPage.vue');
 
 export const FEATURE_GROUPS: FeatureGroup[] = [
   {
@@ -49,45 +49,45 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
         path: 'overview',
         label: 'Overview',
         title: 'Cloud overview',
-        icon: 'DataBoard',
+        icon: 'dashboard',
         minRole: 'viewer',
         subtitle: 'Live status of the MSight cloud stack and its public endpoints.',
         status: 'ready',
-        component: () => import('@/views/OverviewView.vue'),
+        component: () => import('@/pages/OverviewPage.vue'),
       },
       {
         name: 'sensors',
         path: 'sensors',
         label: 'Sensors',
         title: 'Sensors',
-        icon: 'Cpu',
+        icon: 'sensors',
         minRole: 'viewer',
         subtitle:
           'Register sensors, watch their ingest queues, and connect a field device to the topic.',
         status: 'ready',
-        component: () => import('@/views/SensorsView.vue'),
+        component: () => import('@/pages/SensorsPage.vue'),
       },
       {
         name: 'clients',
         path: 'clients',
         label: 'Live clients',
         title: 'Live clients',
-        icon: 'Connection',
+        icon: 'device_hub',
         minRole: 'viewer',
         subtitle: 'WebSocket connections currently served, and what each one subscribes to.',
         status: 'ready',
-        component: () => import('@/views/LiveClientsView.vue'),
+        component: () => import('@/pages/LiveClientsPage.vue'),
       },
       {
         name: 'logs',
         path: 'logs',
         label: 'Logs',
         title: 'Logs',
-        icon: 'Document',
+        icon: 'description',
         minRole: 'operator',
         subtitle: 'Search and tail CloudWatch logs across every component of the stack.',
         status: 'ready',
-        component: () => import('@/views/LogsView.vue'),
+        component: () => import('@/pages/LogsPage.vue'),
       },
     ],
   },
@@ -99,24 +99,24 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
         path: 'database/aurora',
         label: 'Aurora',
         title: 'Aurora PostgreSQL',
-        icon: 'Coin',
+        icon: 'storage',
         minRole: 'operator',
         subtitle:
           'The durable store behind maps, client records, and everything that must survive a restart.',
         status: 'ready',
-        component: () => import('@/views/AuroraView.vue'),
+        component: () => import('@/pages/AuroraPage.vue'),
       },
       {
         name: 'valkey',
         path: 'database/valkey',
         label: 'Valkey',
         title: 'Valkey cache',
-        icon: 'Lightning',
+        icon: 'bolt',
         minRole: 'operator',
         subtitle:
           'The ElastiCache cluster holding live client state, reported locations, and hot lookups.',
         status: 'ready',
-        component: () => import('@/views/ValkeyView.vue'),
+        component: () => import('@/pages/ValkeyPage.vue'),
       },
     ],
   },
@@ -128,11 +128,11 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
         path: 'maps',
         label: 'Maps',
         title: 'Intersection maps',
-        icon: 'MapLocation',
+        icon: 'map',
         minRole: 'operator',
         subtitle: 'Decoded J2735 MAP geometry, drawn and checked for consistency.',
         status: 'ready',
-        component: () => import('@/views/MapsView.vue'),
+        component: () => import('@/pages/MapsPage.vue'),
       },
     ],
   },
@@ -144,12 +144,12 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
         path: 'network',
         label: 'Network',
         title: 'Network',
-        icon: 'Share',
+        icon: 'lan',
         minRole: 'operator',
         subtitle:
           'How the VPC is wired: subnets, routing, security groups, endpoints, and what can actually reach what.',
         status: 'ready',
-        component: () => import('@/views/NetworkView.vue'),
+        component: () => import('@/pages/NetworkPage.vue'),
       },
     ],
   },
@@ -161,23 +161,23 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
         path: 'users',
         label: 'Users',
         title: 'Users',
-        icon: 'User',
+        icon: 'group',
         minRole: 'admin',
         subtitle:
           'Console accounts and their access levels. There is no self-registration — every account is created here.',
         status: 'ready',
-        component: () => import('@/views/UsersView.vue'),
+        component: () => import('@/pages/UsersPage.vue'),
       },
       {
         name: 'cost',
         path: 'cost',
         label: 'Cost',
         title: 'Cost breakdown',
-        icon: 'Money',
+        icon: 'payments',
         minRole: 'admin',
         subtitle: 'What the stack costs, broken down by component.',
         status: 'ready',
-        component: () => import('@/views/CostView.vue'),
+        component: () => import('@/pages/CostPage.vue'),
       },
     ],
   },

@@ -1,14 +1,25 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import { useRoute, useRouter, RouterView, RouterLink } from 'vue-router';
-import { ElMessageBox } from 'element-plus';
+import { computed, ref } from 'vue';
+import { useQuasar } from 'quasar';
+import { useRouter } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
 import BrandMark from '@/components/BrandMark.vue';
 import { FEATURE_GROUPS } from '@/features';
 
+const $q = useQuasar();
 const auth = useAuthStore();
-const route = useRoute();
 const router = useRouter();
+
+/**
+ * The entirety of the responsive navigation logic.
+ *
+ * QDrawer decides mobile vs desktop itself by comparing the layout width to its
+ * `breakpoint`, and in mobile mode supplies the backdrop, the body scroll lock,
+ * swipe-to-close and close-on-route-change. `show-if-above` pins it open on
+ * desktop regardless of this value, so this ref only ever matters on a narrow
+ * screen.
+ */
+const drawerOpen = ref(false);
 
 /**
  * Sidebar is derived from the feature registry, filtered to what this role may
@@ -22,224 +33,222 @@ const visibleGroups = computed(() =>
   })).filter((group) => group.features.length > 0)
 );
 
-const roleTagType = computed(() => {
+const roleColor = computed(() => {
   switch (auth.role) {
     case 'admin':
-      return 'danger';
+      return 'negative';
     case 'operator':
       return 'warning';
     default:
-      return 'info';
+      return 'blue-grey-5';
   }
 });
 
-async function confirmSignOut() {
-  try {
-    await ElMessageBox.confirm('Sign out of the management console?', 'Sign out', {
-      confirmButtonText: 'Sign out',
-      cancelButtonText: 'Cancel',
-      type: 'warning',
-    });
-  } catch {
-    return;
-  }
-  auth.signOut();
-  router.push({ name: 'login' });
+function confirmSignOut() {
+  $q.dialog({
+    title: 'Sign out',
+    message: 'Sign out of the management console?',
+    cancel: { label: 'Cancel', flat: true, color: 'grey-8' },
+    ok: { label: 'Sign out', color: 'primary', unelevated: true },
+  }).onOk(() => {
+    auth.signOut();
+    void router.push({ name: 'login' });
+  });
 }
 </script>
 
 <template>
-  <div class="shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <BrandMark :size="36" />
-        <div>
-          <div class="brand__name">MSight Cloud</div>
-          <div class="brand__sub">Management Console</div>
-        </div>
-      </div>
+  <!-- hHh: the header spans the full width, above the drawer, so the brand sits
+       in one place rather than being split across the two. -->
+  <q-layout view="hHh LpR lFr">
+    <q-header class="bg-primary text-white app-header">
+      <q-toolbar class="app-header__bar">
+        <!-- Only below the drawer's breakpoint. Above it the drawer is always
+             on screen, so a toggle is a control with nothing to do — and it
+             sits where the brand should start. Matches QDrawer's own breakpoint
+             so the button appears exactly when the drawer goes off-canvas. -->
+        <q-btn
+          v-if="$q.screen.lt.md"
+          flat
+          dense
+          round
+          icon="menu"
+          color="white"
+          :aria-label="drawerOpen ? 'Close navigation' : 'Open navigation'"
+          :aria-expanded="drawerOpen"
+          @click="drawerOpen = !drawerOpen"
+        >
+          <q-tooltip>{{ drawerOpen ? 'Hide navigation' : 'Show navigation' }}</q-tooltip>
+        </q-btn>
 
-      <nav class="nav">
-        <div v-for="group in visibleGroups" :key="group.label" class="nav__group">
-          <div class="nav__heading">{{ group.label }}</div>
-          <RouterLink
-            v-for="item in group.features"
-            :key="item.name"
-            class="nav__item"
-            :class="{ 'nav__item--active': route.name === item.name }"
-            :to="{ name: item.name }"
-          >
-            <el-icon class="nav__icon"><component :is="item.icon" /></el-icon>
-            <span class="nav__label">{{ item.label }}</span>
-            <span v-if="item.status === 'planned'" class="nav__soon">soon</span>
-          </RouterLink>
-        </div>
-      </nav>
-    </aside>
+        <BrandMark :size="32" class="q-mr-md" />
 
-    <div class="main">
-      <header class="topbar">
-        <div class="topbar__title">{{ route.meta.title ?? '' }}</div>
-        <div class="topbar__user">
-          <el-tag :type="roleTagType" size="small" effect="light" round>
-            {{ auth.role ?? 'no role' }}
-          </el-tag>
-          <span class="topbar__username">{{ auth.me?.username }}</span>
-          <el-button text :icon="'SwitchButton'" @click="confirmSignOut">Sign out</el-button>
+        <!-- Fixed, not the route title: the page already names itself in its
+             own heading, and repeating it here said the same thing twice. -->
+        <div class="app-header__brand">
+          <div class="app-header__name">MSight Cloud</div>
+          <div class="app-header__sub">Management Console</div>
         </div>
-      </header>
 
-      <main class="content">
-        <RouterView />
-      </main>
-    </div>
-  </div>
+        <q-space />
+
+        <q-chip
+          :color="roleColor"
+          text-color="white"
+          dense
+          square
+          class="text-capitalize text-weight-medium q-mr-sm"
+        >
+          {{ auth.role ?? 'no role' }}
+        </q-chip>
+
+        <!-- Identity is implied by being signed in, so it is the first thing to
+             drop on a narrow screen. The role chip stays: it is what explains
+             why controls are missing. -->
+        <span v-if="$q.screen.gt.sm" class="app-header__user q-mr-sm">
+          {{ auth.me?.username }}
+        </span>
+
+        <q-btn flat dense round icon="logout" color="white" aria-label="Sign out" @click="confirmSignOut">
+          <q-tooltip>Sign out</q-tooltip>
+        </q-btn>
+      </q-toolbar>
+    </q-header>
+
+    <q-drawer
+      v-model="drawerOpen"
+      show-if-above
+      :width="248"
+      :breakpoint="1023"
+      class="app-drawer bg-primary"
+    >
+      <q-scroll-area class="fit">
+        <q-list padding class="q-px-sm">
+          <template v-for="group in visibleGroups" :key="group.label">
+            <q-item-label header class="app-drawer__heading">
+              {{ group.label }}
+            </q-item-label>
+
+            <q-item
+              v-for="item in group.features"
+              :key="item.name"
+              v-ripple
+              clickable
+              :to="{ name: item.name }"
+              active-class="app-drawer__item--active"
+              class="app-drawer__item"
+            >
+              <q-item-section avatar class="app-drawer__icon">
+                <q-icon :name="item.icon" size="19px" />
+              </q-item-section>
+              <q-item-section class="text-body2">{{ item.label }}</q-item-section>
+              <q-item-section v-if="item.status === 'planned'" side>
+                <q-badge outline color="blue-grey-4" label="soon" />
+              </q-item-section>
+            </q-item>
+          </template>
+        </q-list>
+      </q-scroll-area>
+    </q-drawer>
+
+    <q-page-container class="app-page-bg">
+      <router-view />
+    </q-page-container>
+  </q-layout>
 </template>
 
 <style scoped>
-.shell {
-  display: flex;
-  height: 100%;
+/* ---- Header ------------------------------------------------------------- */
+
+.app-header {
+  /* A hairline rather than a drop shadow: the header and drawer are the same
+     colour, and a shadow between them reads as a seam. */
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
 }
 
-.sidebar {
-  width: 244px;
-  flex-shrink: 0;
-  background: var(--sidebar-bg);
-  display: flex;
-  flex-direction: column;
-  padding: 20px 14px;
-  overflow-y: auto;
+.app-header__bar {
+  min-height: 60px;
+  padding-left: 14px;
+  padding-right: 12px;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 4px 8px 20px;
-}
-
-.brand__name {
-  color: #fff;
-  font-weight: 650;
-  font-size: 14px;
+.app-header__brand {
+  min-width: 0;
   line-height: 1.2;
 }
 
-.brand__sub {
-  color: var(--sidebar-text);
+.app-header__name {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.app-header__sub {
   font-size: 11px;
-  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.62);
+  margin-top: 1px;
 }
 
-.nav {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
+.app-header__user {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.72);
 }
 
-.nav__group {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+/* ---- Drawer ------------------------------------------------------------- */
+
+/* Background comes from the bg-primary utility on the element: Quasar's own
+   .q-drawer rule sets a background and outranks a scoped class here, and its
+   bg-* utilities are !important precisely so they can override it. */
+.app-drawer {
+  color: #a3b6cc;
 }
 
-.nav__heading {
+.app-drawer__heading {
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.09em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: #6f88a6;
-  padding: 0 12px 6px;
+  padding: 16px 12px 4px;
+  line-height: 1.4;
+  min-height: 0;
 }
 
-.nav__item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
+.app-drawer__item {
   border-radius: 8px;
-  color: var(--sidebar-text);
-  text-decoration: none;
-  font-size: 14px;
-  font-weight: 500;
+  color: #a3b6cc;
+  min-height: 40px;
+  padding: 0 12px;
+  margin-bottom: 2px;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
-.nav__item:hover {
-  background: var(--sidebar-bg-hover);
-  color: var(--sidebar-text-active);
+.app-drawer__item:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
 }
 
-.nav__item--active {
-  background: var(--sidebar-active);
-  color: var(--sidebar-active-text);
+/* Maize is far too light to carry white text, so the active row flips to navy
+   ink rather than inheriting the drawer's foreground. */
+.app-drawer__item--active {
+  background: #ffcb05;
+  color: #00274c;
   font-weight: 600;
 }
 
-.nav__icon {
-  font-size: 16px;
-  flex-shrink: 0;
+.app-drawer__item--active :deep(.q-badge) {
+  color: #00274c !important;
+  border-color: rgba(0, 39, 76, 0.35) !important;
 }
 
-.nav__label {
-  flex: 1;
-  min-width: 0;
+/* The default avatar section reserves 56px, too wide beside a 19px icon in a
+   248px drawer. */
+.app-drawer__icon {
+  min-width: 32px;
+  padding-right: 0;
 }
 
-.nav__soon {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #8ea6bf;
-  border: 1px solid #2b4f74;
-  border-radius: 4px;
-  padding: 1px 5px;
-}
-
-.nav__item--active .nav__soon {
-  color: var(--sidebar-active-text);
-  border-color: #00274c55;
-}
-
-.main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.topbar {
-  height: 60px;
-  flex-shrink: 0;
-  background: var(--card-bg);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 28px;
-}
-
-.topbar__title {
-  font-weight: 600;
-  font-size: 15px;
-}
-
-.topbar__user {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.topbar__username {
-  font-size: 13px;
-  color: var(--text-muted);
-}
-
-.content {
-  flex: 1;
-  overflow-y: auto;
-  padding: 28px;
+.app-page-bg {
+  background: #f4f6fa;
 }
 </style>

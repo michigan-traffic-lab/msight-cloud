@@ -17,6 +17,7 @@ docs
 # the CDK asset hash, so an unrelated edit forces a full image rebuild and ECR
 # push. admin-console/dist in particular is regenerated on every frontend build.
 admin-console
+admin-console-old
 package.json
 package-lock.json
 jest.config.js

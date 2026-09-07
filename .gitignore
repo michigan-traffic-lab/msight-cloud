@@ -25,3 +25,11 @@ deploy.config.yaml
 admin-console/dist/
 admin-console/.env
 admin-console/.env.local
+# Quasar CLI build artefacts and generated types.
+admin-console/.quasar/
+admin-console/node_modules/
+# The Element Plus console, kept for reference during the Quasar migration.
+admin-console-old/dist/
+admin-console-old/.env
+admin-console-old/.env.local
+admin-console-old/node_modules/
