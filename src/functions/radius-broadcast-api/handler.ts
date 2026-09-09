@@ -9,6 +9,7 @@ import {
 } from '../../shared/schemas/radius-broadcast';
 import { HealthResponseSchema } from '../../shared/schemas/location';
 import { radiusBroadcaster } from '../../shared/radius-broadcaster.js';
+import { debugLog } from '../../shared/debug-log';
 
 // ---- direct Lambda invocation (Lambda-to-Lambda, no API GW wrapper) ------
 //
@@ -139,7 +140,7 @@ export async function handler(
   const { app_id, origin, radius_m, message, limit, event_id } = parsedRequest.data;
   const eventId = event_id ?? randomUUID();
 
-  console.log('radius broadcast request', {
+  debugLog('radius broadcast request', {
     appId: app_id,
     eventId,
     lat: origin.lat,
@@ -162,7 +163,7 @@ export async function handler(
       limit,
     });
 
-    console.log('radius broadcast complete', {
+    debugLog('radius broadcast complete', {
       appId: app_id,
       eventId,
       nearbyClientCount: result.nearbyClientCount,

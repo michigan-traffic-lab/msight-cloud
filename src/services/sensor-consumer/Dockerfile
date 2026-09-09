@@ -11,6 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/vendor/PyV2XLib_ASN ./PyV2XLib_ASN
 RUN pip install --no-cache-dir ./PyV2XLib_ASN
 
+# Shared code. The two SPaT Lambdas get this same module through the Python
+# layer; here it is copied in, so the caching behaviour is defined once for
+# every process that reads MSight configuration out of Aurora.
+COPY src/shared/python/msight_config_cache.py .
+
 # Application code
 COPY src/services/sensor-consumer/consumer.py .
 COPY src/services/sensor-consumer/radius_broadcaster.py .

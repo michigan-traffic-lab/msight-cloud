@@ -10,6 +10,7 @@ import {
   type LocationUpdateRequest,
 } from '../../shared/schemas/location';
 import { sendValkeyArrayCommand } from '../../shared/valkey-client.js';
+import { debugLog } from '../../shared/debug-log';
 
 const ZONE_ID = 'zone01';
 const DEFAULT_LOCATION_TTL_SECONDS = 30 * 60;
@@ -78,6 +79,25 @@ function buildClientHashFields(
   ];
 }
 
+// One location update is three writes: the geo index, the client hash, and the
+// expiry set. They were three separate commands, and valkey-client.ts keeps a
+// single command in flight, so they cost three serial round trips on the single
+// most frequently called endpoint in the system — every connected client posts
+// its position on a timer.
+//
+// A Lua script makes it one round trip. MULTI/EXEC would have been the more
+// obvious way to express "these three go together", but it would not have
+// helped: with a one-command-in-flight client, MULTI, the three queued commands
+// and EXEC are five round trips rather than three. Lua is what collapses the
+// count, and it is atomic as a side effect — a reader can no longer observe a
+// client present in the geo index but with no hash behind it.
+const UPSERT_CLIENT_LOCATION_LUA = `
+redis.call('GEOADD', KEYS[1], ARGV[1], ARGV[2], ARGV[3])
+redis.call('ZADD', KEYS[3], ARGV[4], ARGV[3])
+redis.call('HSET', KEYS[2], unpack(ARGV, 5))
+return 1
+`;
+
 async function upsertClientLocation(request: LocationUpdateRequest): Promise<void> {
   const ttlSeconds = getLocationTtlSeconds();
   const expiresAtEpochMs = Date.now() + ttlSeconds * 1000;
@@ -86,7 +106,7 @@ async function upsertClientLocation(request: LocationUpdateRequest): Promise<voi
   const clientKey = buildClientKey(request.app_id, request.client_id);
   const expirationKey = buildExpirationKey(request.app_id);
 
-  console.log('Valkey write start', {
+  debugLog('Valkey write start', {
     cacheHost: process.env.CACHE_HOST,
     appId: request.app_id,
     clientId: request.client_id,
@@ -97,27 +117,21 @@ async function upsertClientLocation(request: LocationUpdateRequest): Promise<voi
   });
 
   await sendValkeyArrayCommand([
-    'GEOADD',
+    'EVAL',
+    UPSERT_CLIENT_LOCATION_LUA,
+    3,
     geoClientsKey,
+    clientKey,
+    expirationKey,
     request.location.lon,
     request.location.lat,
     request.client_id,
-  ]);
-
-  await sendValkeyArrayCommand([
-    'HSET',
-    clientKey,
+    expiresAtEpochMs,
+    // ARGV[5..] are the hash field/value pairs, spread into HSET by unpack().
     ...buildClientHashFields(request, expiresAtIso, expiresAtEpochMs),
   ]);
 
-  await sendValkeyArrayCommand([
-    'ZADD',
-    expirationKey,
-    expiresAtEpochMs,
-    request.client_id,
-  ]);
-
-  console.log('Valkey write finished', {
+  debugLog('Valkey write finished', {
     appId: request.app_id,
     clientId: request.client_id,
     expiresAt: expiresAtIso,

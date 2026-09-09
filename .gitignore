@@ -33,3 +33,9 @@ admin-console-old/dist/
 admin-console-old/.env
 admin-console-old/.env.local
 admin-console-old/node_modules/
+
+# Python bytecode. These sit inside the Lambda function directories, which are
+# packaged with Code.fromAsset, so leaving them around changes the asset hash
+# and ships compiled junk in the deployment bundle.
+__pycache__/
+*.pyc

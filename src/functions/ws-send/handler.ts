@@ -1,4 +1,5 @@
 import type { Context } from 'aws-lambda';
+import { debugLog } from '../../shared/debug-log';
 import {
   ApiGatewayManagementApiClient,
   GoneException,
@@ -87,7 +88,7 @@ export async function handler(event: WsSendEvent, _context: Context): Promise<Ws
           clearTimeout(abortTimer);
         }
 
-        console.log('ws-send delivered', {
+        debugLog('ws-send delivered', {
           appId: event?.app_id,
           clientId: item.clientId,
           connectionId: item.connectionId,

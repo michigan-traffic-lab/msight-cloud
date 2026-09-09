@@ -17,6 +17,7 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
+import { logRetentionFromContext } from './log-retention';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
@@ -172,6 +173,34 @@ export class MsightCloudStack extends cdk.Stack {
     // anything omitted falls back to a deployment-scoped default.
     const nameOverrides = (this.node.tryGetContext('resourceNames') ??
       {}) as ResourceNameOverrides;
+
+    /**
+     * How long log groups keep events, from deploy.config.yaml.
+     *
+     * Retention is the only thing that bounds log storage, and it is a cost
+     * decision rather than a structural one — different deployments want
+     * different windows — so it belongs in config rather than in this file.
+     * Validated here so an unsupported value fails at synth with a message
+     * naming the key, instead of at deploy with a CloudWatch API error.
+     */
+    const logRetention = logRetentionFromContext(this.node.tryGetContext('logRetentionDays'));
+
+    /**
+     * How long the SPaT consumers cache their configuration lookups.
+     *
+     * They read which apps want SPaT and where each intersection is. Both are
+     * hand-edited configuration, but they sit on a path that runs at roughly
+     * 10 Hz per sensor — querying them per message held Aurora at 116
+     * connections with capacity pinned to its ceiling, and Aurora Serverless
+     * bills per ACU-hour.
+     *
+     * The cost of caching is staleness: a new app or a moved intersection takes
+     * up to this long to take effect. Raising it saves more; lowering it makes
+     * edits apply sooner.
+     */
+    const configCacheTtlSeconds = String(
+      this.node.tryGetContext('configCacheTtlSeconds') ?? 60
+    );
     const name = names(deployment, nameOverrides);
 
     const configuredTags = (this.node.tryGetContext('tags') ?? {}) as Record<string, unknown>;
@@ -446,13 +475,38 @@ export class MsightCloudStack extends cdk.Stack {
     // -------------------------
     // Location Lambda
     // -------------------------
+    /**
+     * Every Lambda gets a named, CDK-owned log group.
+     *
+     * Left undeclared, Lambda creates /aws/lambda/<generated-name> on first
+     * write with no retention, so events accumulate forever and CloudWatch bills
+     * for the storage — two of these groups had reached 276 GB between them.
+     * Those groups are also invisible to `cdk destroy`, since nothing in the
+     * stack owns them.
+     *
+     * Declaring the group instead fixes all three: two-week retention (long
+     * enough to investigate an incident, short enough to bound volume), a name
+     * that says which deployment and function it belongs to, and removal with
+     * the stack.
+     *
+     * `logGroup` rather than `logRetention`: the latter is deprecated, and
+     * Lambda's LoggingConfig accepts any group name, so this needs no explicit
+     * `functionName` — setting one would replace the function and recreate its
+     * SNS subscriptions and event sources.
+     */
     const locationLambda = new NodejsFunction(this, 'LocationLambda', {
+      logGroup: new logs.LogGroup(this, 'LocationLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/location`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       ...commonLambdaProps,
       entry: path.join(__dirname, '../src/functions/location-api/handler.ts'),
       handler: 'handler',
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'location-api',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
@@ -462,12 +516,18 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     const wsConnectLambda = new NodejsFunction(this, 'WsConnectLambda', {
+      logGroup: new logs.LogGroup(this, 'WsConnectLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/ws-connect`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       ...commonLambdaProps,
       entry: path.join(__dirname, '../src/functions/ws-connect/handler.ts'),
       handler: 'handler',
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'ws-connect',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
@@ -476,12 +536,18 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     const wsDisconnectLambda = new NodejsFunction(this, 'WsDisconnectLambda', {
+      logGroup: new logs.LogGroup(this, 'WsDisconnectLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/ws-disconnect`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       ...commonLambdaProps,
       entry: path.join(__dirname, '../src/functions/ws-disconnect/handler.ts'),
       handler: 'handler',
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'ws-disconnect',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
@@ -490,6 +556,11 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     const radiusBroadcastLambda = new NodejsFunction(this, 'RadiusBroadcastLambda', {
+      logGroup: new logs.LogGroup(this, 'RadiusBroadcastLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/radius-broadcast`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       ...commonLambdaProps,
       entry: path.join(__dirname, '../src/functions/radius-broadcast-api/handler.ts'),
       handler: 'handler',
@@ -497,6 +568,7 @@ export class MsightCloudStack extends cdk.Stack {
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'radius-broadcast-api',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
@@ -506,6 +578,11 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     const wsSenderLambda = new NodejsFunction(this, 'WsSenderLambda', {
+      logGroup: new logs.LogGroup(this, 'WsSenderLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/ws-sender`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       ...publicLambdaProps,
       entry: path.join(__dirname, '../src/functions/ws-send/handler.ts'),
       handler: 'handler',
@@ -513,18 +590,25 @@ export class MsightCloudStack extends cdk.Stack {
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'ws-send',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
         WS_SEND_TIMEOUT_MS: '10000',
       },
     });
 
     const sensorLambda = new NodejsFunction(this, 'SensorLambda', {
+      logGroup: new logs.LogGroup(this, 'SensorLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/sensor`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       ...publicLambdaProps,
       entry: path.join(__dirname, '../src/functions/sensor-api/handler.ts'),
       handler: 'handler',
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'sensor-api',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
       },
     });
@@ -536,12 +620,18 @@ export class MsightCloudStack extends cdk.Stack {
     // System Lambda
     // -------------------------
     const systemLambda = new NodejsFunction(this, 'SystemLambda', {
+      logGroup: new logs.LogGroup(this, 'SystemLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/system`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       ...commonLambdaProps,
       entry: path.join(__dirname, '../src/functions/system-api/handler.ts'),
       handler: 'handler',
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'system-api',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
       },
     });
@@ -550,12 +640,18 @@ export class MsightCloudStack extends cdk.Stack {
     // Latency Lambda
     // -------------------------
     const latencyLambda = new NodejsFunction(this, 'LatencyLambda', {
+      logGroup: new logs.LogGroup(this, 'LatencyLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/latency`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       ...commonLambdaProps,
       entry: path.join(__dirname, '../src/functions/latency-api/handler.ts'),
       handler: 'handler',
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'latency-api',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
@@ -573,12 +669,18 @@ export class MsightCloudStack extends cdk.Stack {
     // Maps Lambda
     // -------------------------
     const mapsLambda = new NodejsFunction(this, 'MapsLambda', {
+      logGroup: new logs.LogGroup(this, 'MapsLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/maps`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       ...commonLambdaProps,
       entry: path.join(__dirname, '../src/functions/maps-api/handler.ts'),
       handler: 'handler',
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'maps-api',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
         DB_HOST: proxy.endpoint,
         DB_PORT: '5432',
@@ -592,6 +694,11 @@ export class MsightCloudStack extends cdk.Stack {
     let cacheDebugLambda: NodejsFunction | undefined;
     if (isDebugMode) {
       cacheDebugLambda = new NodejsFunction(this, 'CacheDebugLambda', {
+      logGroup: new logs.LogGroup(this, 'CacheDebugLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/cache-debug`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
         ...commonLambdaProps,
         entry: path.join(__dirname, '../src/functions/cache-debug/handler.ts'),
         handler: 'handler',
@@ -599,6 +706,7 @@ export class MsightCloudStack extends cdk.Stack {
         environment: {
           API_VERSION: 'v1',
           SERVICE_NAME: 'cache-debug',
+        DEBUG_LOGGING: 'false',
           BUILD_ID: buildId,
           CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
           CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
@@ -813,12 +921,18 @@ export class MsightCloudStack extends cdk.Stack {
     // Expiration Cleanup Lambda
     // -------------------------
     const expirationCleanupLambda = new NodejsFunction(this, 'ExpirationCleanupLambda', {
+      logGroup: new logs.LogGroup(this, 'ExpirationCleanupLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/expiration-cleanup`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       ...commonLambdaProps,
       entry: path.join(__dirname, '../src/functions/expiration-cleanup/handler.ts'),
       handler: 'handler',
       timeout: cdk.Duration.seconds(60),
       environment: {
         SERVICE_NAME: 'expiration-cleanup',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
@@ -971,10 +1085,30 @@ export class MsightCloudStack extends cdk.Stack {
       );
     }
 
+    // MSight's own shared Python modules ride in the same layer as the
+    // third-party dependencies, which is what lets both SPaT consumers import
+    // them without each function bundle carrying its own copy. The Fargate
+    // sensor consumer COPYs the same files in its Dockerfile.
+    //
+    // Copied on EVERY synth, deliberately outside the cache guard above: the
+    // pip installs are skipped once .layer-build exists, so a shared module
+    // edited after the first synth would otherwise never reach the layer and
+    // the deployed Lambdas would silently run the old copy.
+    fs.mkdirSync(pyV2XLayerOutput, { recursive: true });
+    const sharedPythonDir = path.join(__dirname, '../src/shared/python');
+    for (const entry of fs.readdirSync(sharedPythonDir)) {
+      if (entry.endsWith('.py')) {
+        fs.copyFileSync(
+          path.join(sharedPythonDir, entry),
+          path.join(pyV2XLayerOutput, entry),
+        );
+      }
+    }
+
     const pyV2XLayer = new lambda.LayerVersion(this, 'PyV2XLayer', {
       code: lambda.Code.fromAsset(path.join(__dirname, '../.layer-build/pyv2x')),
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
-      description: 'pyv2xlib + pycrate + psycopg2 + redis — V2X ASN.1 decoding, PostgreSQL, and Valkey access',
+      description: 'pyv2xlib + pycrate + psycopg2 + redis + msight shared modules — V2X ASN.1 decoding, PostgreSQL, and Valkey access',
     });
 
     // -------------------------
@@ -1030,7 +1164,7 @@ export class MsightCloudStack extends cdk.Stack {
 
     const sensorLogGroup = new logs.LogGroup(this, 'SensorConsumerLogGroup', {
       logGroupName: name.sensorLogGroup('all'),
-      retention: logs.RetentionDays.ONE_WEEK,
+      retention: logRetention.container,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
@@ -1076,6 +1210,11 @@ export class MsightCloudStack extends cdk.Stack {
     // SPaT SNS consumer Lambda (Python)
     // -------------------------
     const spatSnsConsumerLambda = new lambda.Function(this, 'SpatSnsConsumerLambda', {
+      logGroup: new logs.LogGroup(this, 'SpatSnsConsumerLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/spat-sns-consumer`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       runtime: lambda.Runtime.PYTHON_3_12,
       code: lambda.Code.fromAsset(path.join(__dirname, '../src/functions/spat-sns-consumer')),
       handler: 'handler.handler',
@@ -1087,6 +1226,8 @@ export class MsightCloudStack extends cdk.Stack {
       layers: [pyV2XLayer],
       environment: {
         SERVICE_NAME: 'spat-sns-consumer',
+        DEBUG_LOGGING: 'false',
+        CONFIG_CACHE_TTL_SECONDS: configCacheTtlSeconds,
         BUILD_ID: buildId,
         RADIUS_BROADCAST_LAMBDA_NAME: radiusBroadcastLambda.functionName,
         SPAT_BROADCAST_RADIUS_M: String(spatBroadcastRadiusM),
@@ -1113,6 +1254,11 @@ export class MsightCloudStack extends cdk.Stack {
     // broadcasting; emits "critical_spat" WebSocket messages.
     // -------------------------
     const criticalSpatSnsConsumerLambda = new lambda.Function(this, 'CriticalSpatSnsConsumerLambda', {
+      logGroup: new logs.LogGroup(this, 'CriticalSpatSnsConsumerLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/critical-spat-sns-consumer`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       runtime: lambda.Runtime.PYTHON_3_12,
       code: lambda.Code.fromAsset(path.join(__dirname, '../src/functions/critical-spat-sns-consumer')),
       handler: 'handler.handler',
@@ -1124,6 +1270,8 @@ export class MsightCloudStack extends cdk.Stack {
       layers: [pyV2XLayer],
       environment: {
         SERVICE_NAME: 'critical-spat-sns-consumer',
+        DEBUG_LOGGING: 'false',
+        CONFIG_CACHE_TTL_SECONDS: configCacheTtlSeconds,
         BUILD_ID: buildId,
         RADIUS_BROADCAST_LAMBDA_NAME: radiusBroadcastLambda.functionName,
         SPAT_BROADCAST_RADIUS_M: String(spatBroadcastRadiusM),
@@ -1288,6 +1436,11 @@ export class MsightCloudStack extends cdk.Stack {
     // console after first sign-in, or move it to Secrets Manager.
     // -------------------------
     const adminBootstrapLambda = new NodejsFunction(this, 'AdminBootstrapLambda', {
+      logGroup: new logs.LogGroup(this, 'AdminBootstrapLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/admin-bootstrap`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       runtime: lambda.Runtime.NODEJS_22_X,
       entry: path.join(__dirname, '../src/functions/admin-bootstrap/handler.ts'),
       handler: 'handler',
@@ -1311,7 +1464,7 @@ export class MsightCloudStack extends cdk.Stack {
     const adminBootstrapProvider = new cr.Provider(this, 'AdminBootstrapProvider', {
       onEventHandler: adminBootstrapLambda,
       logGroup: new logs.LogGroup(this, 'AdminBootstrapProviderLogGroup', {
-        retention: logs.RetentionDays.ONE_WEEK,
+        retention: logRetention.lambda,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
     });
@@ -1341,6 +1494,11 @@ export class MsightCloudStack extends cdk.Stack {
     // behind the same API rather than moving this one inside.
     // -------------------------
     const adminApiLambda = new NodejsFunction(this, 'AdminApiLambda', {
+      logGroup: new logs.LogGroup(this, 'AdminApiLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/admin-api`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       runtime: lambda.Runtime.NODEJS_22_X,
       entry: path.join(__dirname, '../src/functions/admin-api/handler.ts'),
       handler: 'handler',
@@ -1352,6 +1510,7 @@ export class MsightCloudStack extends cdk.Stack {
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'admin-api',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
         USER_POOL_ID: adminUserPool.userPoolId,
         USER_POOL_CLIENT_ID: adminUserPoolClient.userPoolClientId,
@@ -1482,6 +1641,11 @@ export class MsightCloudStack extends cdk.Stack {
     // behind the same API and the same authorizer; only placement differs.
     // -------------------------
     const adminVpcApiLambda = new NodejsFunction(this, 'AdminVpcApiLambda', {
+      logGroup: new logs.LogGroup(this, 'AdminVpcApiLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/admin-vpc-api`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       runtime: lambda.Runtime.NODEJS_22_X,
       entry: path.join(__dirname, '../src/functions/admin-vpc-api/handler.ts'),
       handler: 'handler',
@@ -1494,6 +1658,7 @@ export class MsightCloudStack extends cdk.Stack {
       environment: {
         API_VERSION: 'v1',
         SERVICE_NAME: 'admin-vpc-api',
+        DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
@@ -1623,6 +1788,11 @@ export class MsightCloudStack extends cdk.Stack {
     // deployment to zero sensors.
     // -------------------------
     const sensorReaperFn = new NodejsFunction(this, 'SensorReaperFunction', {
+      logGroup: new logs.LogGroup(this, 'SensorReaperFunctionLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/sensor-reaper`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       runtime: lambda.Runtime.NODEJS_22_X,
       entry: path.join(__dirname, '../src/functions/sensor-reaper/handler.ts'),
       handler: 'onEvent',
@@ -1641,6 +1811,11 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     const sensorReaperPollFn = new NodejsFunction(this, 'SensorReaperPollFunction', {
+      logGroup: new logs.LogGroup(this, 'SensorReaperPollFunctionLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/sensor-reaper-poll`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       runtime: lambda.Runtime.NODEJS_22_X,
       entry: path.join(__dirname, '../src/functions/sensor-reaper/handler.ts'),
       handler: 'isComplete',
@@ -1712,7 +1887,7 @@ export class MsightCloudStack extends cdk.Stack {
       totalTimeout: cdk.Duration.minutes(30),
       logGroup: new logs.LogGroup(this, 'SensorReaperProviderLogGroup', {
         logGroupName: `/${name.logPrefix}/sensor-reaper`,
-        retention: logs.RetentionDays.ONE_WEEK,
+        retention: logRetention.lambda,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
     });
@@ -1873,7 +2048,7 @@ export class MsightCloudStack extends cdk.Stack {
     for (const { id, stage } of apiStages) {
       const accessLogGroup = new logs.LogGroup(this, `${id}AccessLogs`, {
         logGroupName: name.apiAccessLogGroup(id),
-        retention: logs.RetentionDays.ONE_WEEK,
+        retention: logRetention.api,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       });
 

@@ -25,6 +25,8 @@ const app = new cdk.App({
     clientAppIds:         config['clientAppIds']         ?? [],
     deploymentName:       config['deploymentName']       ?? 'msight-cloud',
     resourceNames:        config['resourceNames']        ?? {},
+    logRetentionDays:     config['logRetentionDays']     ?? {},
+    configCacheTtlSeconds: config['configCacheTtlSeconds'] ?? 60,
   },
 });
 

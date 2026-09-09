@@ -70,6 +70,43 @@ adminConsole:
 clientAppIds:
   - app_demo
 
+# ── Config cache ──────────────────────────────────────────────────────────────
+# Seconds the SPaT consumers cache their configuration lookups (which apps want
+# SPaT, and where each intersection is).
+#
+# Those two queries sit on a path that runs at roughly 10 Hz per sensor. Run
+# uncached they held Aurora at 116 connections with capacity against its
+# ceiling, and Aurora Serverless bills per ACU-hour — so this is a cost setting.
+#
+# The trade is staleness: adding an app or moving an intersection takes up to
+# this long to take effect. Raise it to save more, lower it for faster edits.
+configCacheTtlSeconds: 60
+
+# ── Log retention ─────────────────────────────────────────────────────────────
+# How long CloudWatch keeps log events, in days.
+#
+# Retention is the only thing that bounds log storage. Left unset, CloudWatch
+# keeps events forever and bills for them — two Lambda log groups in this stack
+# reached 276 GB between them that way.
+#
+# Note this caps STORAGE, not ingestion. Ingestion is billed per GB written and
+# is far the larger cost on this stack; it is controlled by how much the code
+# logs, not by this setting. The hot-path functions log per-message detail only
+# when DEBUG_LOGGING is set on them.
+#
+# Must be a value CloudWatch accepts: 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180,
+# 365, 400, 545, 731, 1827, 3653 — or 0 to keep forever. Synth fails on anything
+# else rather than letting the deploy fail with a less specific error.
+#
+# Omit the block, or any key in it, to take the defaults shown.
+logRetentionDays:
+  # Every Lambda in the stack. Long enough to investigate an incident.
+  lambda: 7
+  # Fargate sensor consumer containers.
+  container: 7
+  # API Gateway access logs — high volume, low value after a few days.
+  api: 7
+
 # ── Deployment identity ───────────────────────────────────────────────────────
 # Names every resource this stack creates and identifies it in tags.
 #

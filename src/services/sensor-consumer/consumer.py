@@ -21,6 +21,7 @@ import psycopg2
 import redis
 
 from pyv2xlib.SDSMDecoder import sdsm_decoder
+from msight_config_cache import ConfigCache
 from radius_broadcaster import WsClient, get_nearby_clients, broadcast_to_clients
 
 # ---- configuration -------------------------------------------------------
@@ -40,7 +41,15 @@ CACHE_TLS_ENABLED = os.environ.get('CACHE_TLS_ENABLED', 'false').lower() == 'tru
 AWS_REGION        = os.environ.get('AWS_REGION', 'us-east-1')
 
 # App IDs in-memory cache — avoids a DB round-trip on every message.
-_APP_IDS_CACHE_TTL = 30  # seconds
+#
+# One task per sensor means one long-lived process, so this cache is held for
+# the life of the task rather than the life of a Lambda container. The refresh
+# point is still randomised per entry: sensor tasks are all started by the same
+# deployment and would otherwise refresh in lockstep, and a fleet of them
+# hitting Aurora together is what pushes a Serverless cluster into a scale-up
+# it then bills for. See msight_config_cache.
+CONFIG_TTL_S  = float(os.environ.get('CONFIG_CACHE_TTL_SECONDS', '30'))
+CONFIG_JITTER = float(os.environ.get('CONFIG_CACHE_JITTER', '0.25'))
 
 # ---- graceful shutdown ---------------------------------------------------
 _shutdown = False
@@ -58,8 +67,9 @@ _sqs_client   = None
 _db_conn      = None
 _secret_cache = None
 _redis_client = None
-_app_ids_cache: list | None = None
-_app_ids_cache_ts: float = 0.0
+
+_APP_IDS_KEY = 'sdsm_app_ids'
+_app_ids_cache = ConfigCache(ttl_s=CONFIG_TTL_S, jitter=CONFIG_JITTER)
 
 # ---- pending merge buffer ------------------------------------------------
 _pending_sdsm_ts: float | None = None
@@ -85,14 +95,28 @@ def _load_db_credentials():
     return _secret_cache['username'], _secret_cache['password']
 
 
-def _get_db_conn():
+def _reset_db_conn():
+    """Drop the cached connection so the next call dials a new one."""
     global _db_conn
-    if _db_conn and not _db_conn.closed:
+    if _db_conn is not None:
         try:
-            _db_conn.cursor().execute('SELECT 1')
-            return _db_conn
+            _db_conn.close()
         except Exception:
             pass
+        _db_conn = None
+
+
+def _get_db_conn():
+    """Return the task's connection, dialling one if it has none.
+
+    Deliberately does NOT probe the connection first. The probe this replaces
+    ran 'SELECT 1' before returning, so every app-id lookup cost two queries
+    instead of one to check for a condition the real query reports anyway.
+    _get_sdsm_app_ids() retries instead.
+    """
+    global _db_conn
+    if _db_conn is not None and not _db_conn.closed:
+        return _db_conn
     username, password = _load_db_credentials()
     _db_conn = psycopg2.connect(
         host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
@@ -123,17 +147,41 @@ def _get_redis():
 
 
 def _get_sdsm_app_ids() -> list:
-    """Cached — queries Aurora at most once every APP_IDS_CACHE_TTL seconds."""
-    global _app_ids_cache, _app_ids_cache_ts
-    now = time.monotonic()
-    if _app_ids_cache is not None and now - _app_ids_cache_ts < _APP_IDS_CACHE_TTL:
-        return _app_ids_cache
-    conn = _get_db_conn()
-    with conn.cursor() as cur:
-        cur.execute('SELECT app_id FROM apps WHERE receive_sdsm = TRUE')
-        _app_ids_cache = [row[0] for row in cur.fetchall()]
-    _app_ids_cache_ts = now
-    return _app_ids_cache
+    """Which apps want SDSM. Cached, with a randomised refresh point.
+
+    Serves the cached list without a round trip until that point, then reloads.
+    If the reload fails the previous list is used rather than dropping live
+    SDSM; ConfigCache bounds how long that fallback lasts, so a long outage
+    surfaces as an error instead of as indefinitely stale configuration.
+    """
+    fresh, app_ids = _app_ids_cache.fresh(_APP_IDS_KEY)
+    if fresh:
+        return app_ids
+
+    last_error = None
+    for _attempt in (1, 2):
+        try:
+            conn = _get_db_conn()
+            with conn.cursor() as cur:
+                cur.execute('SELECT app_id FROM apps WHERE receive_sdsm = TRUE')
+                app_ids = [row[0] for row in cur.fetchall()]
+            _app_ids_cache.put(_APP_IDS_KEY, app_ids)
+            return app_ids
+        except psycopg2.Error as error:
+            # The RDS Proxy or a failover can close a pooled connection under
+            # us; reconnect and try once more before giving up.
+            last_error = error
+            _reset_db_conn()
+
+    print(json.dumps({
+        'event': 'app_ids_query_failed',
+        'sensor_name': SENSOR_NAME,
+        'error': str(last_error),
+    }))
+    stale_ok, stale_app_ids = _app_ids_cache.stale(_APP_IDS_KEY)
+    if stale_ok:
+        return stale_app_ids
+    raise last_error
 
 
 def _sdsm_ts_to_float(sdsm_ts: dict) -> float:
