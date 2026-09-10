@@ -6,6 +6,10 @@ import { requireRole } from '../src/shared/admin-api/middleware/require-role';
 import { buildRouter } from '../src/functions/admin-api/routes';
 import { sensorQueueName } from '../src/shared/deployment-naming';
 import { buildVpcRouter } from '../src/functions/admin-vpc-api/routes';
+import {
+  routePrefixOf,
+  VPC_ROUTE_PREFIXES,
+} from '../src/shared/admin-api/vpc-route-prefixes';
 
 function makeEvent(groups: unknown, username = 'alice'): APIGatewayProxyEventV2WithJWTAuthorizer {
   return {
@@ -290,6 +294,10 @@ describe('in-VPC admin router', () => {
   it('registers the in-VPC surface', () => {
     expect(buildVpcRouter('v1').list().sort()).toEqual(
       [
+        'GET /v1/admin/clusters',
+        'POST /v1/admin/clusters',
+        'PATCH /v1/admin/clusters/:name',
+        'DELETE /v1/admin/clusters/:name',
         'GET /v1/admin/clients/summary',
         'GET /v1/admin/clients/search',
         'GET /v1/admin/clients/sample',
@@ -311,9 +319,66 @@ describe('in-VPC admin router', () => {
         'POST /v1/admin/sensors',
         'POST /v1/admin/sensors/reconcile',
         'POST /v1/admin/sensors/:name/enabled',
+        'POST /v1/admin/sensors/:name/ingest',
         'DELETE /v1/admin/sensors/:name',
+        'GET /v1/admin/storages',
+        'GET /v1/admin/storages/available',
+        'POST /v1/admin/storages',
+        'POST /v1/admin/storages/reconcile',
+        'PATCH /v1/admin/storages/:bucket',
+        'DELETE /v1/admin/storages/:bucket',
+        'GET /v1/admin/storages/:bucket/objects',
+        'GET /v1/admin/apps',
+        'POST /v1/admin/apps',
+        'PATCH /v1/admin/apps/:appId',
+        'DELETE /v1/admin/apps/:appId',
+        'GET /v1/admin/github/app',
+        'POST /v1/admin/github/app',
+        'POST /v1/admin/github/app/manifest-intent',
+        'POST /v1/admin/github/app/from-manifest',
+        'DELETE /v1/admin/github/app',
+        'POST /v1/admin/github/install-intent',
+        'GET /v1/admin/github/installations',
+        'POST /v1/admin/github/installations',
+        'GET /v1/admin/github/installations/:installationId/repositories',
+        'DELETE /v1/admin/github/installations/:installationId',
+        'GET /v1/admin/microservices',
+        'POST /v1/admin/microservices',
+        'POST /v1/admin/microservices/:name/check',
+        'PATCH /v1/admin/microservices/:name',
+        'DELETE /v1/admin/microservices/:name',
       ].sort()
     );
+  });
+
+  /**
+   * The API Gateway sends only these prefixes to the in-VPC function; anything
+   * else matches a greedy catch-all pointing at the out-of-VPC one. A prefix
+   * missing from the list therefore does not fail loudly — the request reaches
+   * the wrong Lambda, finds no such route, and 404s, which the console renders
+   * as "Unavailable" while the function that owns the page is never invoked.
+   * Both `apps` and `storages` shipped that way.
+   */
+  it('routes every in-VPC path through a declared gateway prefix', () => {
+    const undeclared = buildVpcRouter('v1')
+      .list()
+      .map((route) => routePrefixOf(route.split(' ')[1]))
+      .filter((prefix): prefix is string => prefix !== null)
+      .filter((prefix) => !VPC_ROUTE_PREFIXES.includes(prefix as never));
+
+    expect([...new Set(undeclared)]).toEqual([]);
+  });
+
+  it('declares no gateway prefix the in-VPC router does not serve', () => {
+    // The other direction: a stale prefix steals its whole subtree from the
+    // out-of-VPC function, which is the same failure with the Lambdas swapped.
+    const served = new Set(
+      buildVpcRouter('v1')
+        .list()
+        .map((route) => routePrefixOf(route.split(' ')[1]))
+    );
+
+    expect(VPC_ROUTE_PREFIXES.filter((prefix) => !served.has(prefix))).toEqual([]);
   });
 
   it('has no route that would list every client', () => {

@@ -267,14 +267,126 @@ export interface SensorEntry {
   name: string;
   display_name: string | null;
   enabled: boolean;
+  /** Real-time path: SNS topic to a per-sensor SQS queue to a Fargate consumer. */
+  stream_enabled: boolean;
+  /** Aggregated path: the edge device writes files straight to S3. */
+  archive_enabled: boolean;
+  storage_bucket: string | null;
+  storage_prefix: string;
   created_at: string;
   updated_at: string;
+  /** enabled AND stream_enabled — whether streaming infrastructure should exist. */
+  streaming_desired: boolean;
   queue_name: string;
   /** Actual infrastructure state, not what the registry asks for. */
   queue_exists: boolean;
   service_exists: boolean;
   messages_available: number | null;
   messages_in_flight: number | null;
+}
+
+export interface BucketFacts {
+  name: string;
+  exists: boolean;
+  region: string | null;
+  tags: Record<string, string>;
+  versioning: string | null;
+  /** This deployment's ObjectCreated rule is present on the bucket. */
+  notifies_control_topic: boolean;
+  /** Key prefixes the listener filters on. Empty string means the whole bucket. */
+  notification_prefixes: string[];
+  foreign_notification_ids: string[];
+  access_error: string | null;
+}
+
+export interface StorageEntry {
+  bucket: string;
+  display_name: string | null;
+  region: string | null;
+  /** Whether this deployment created the bucket or adopted an existing one. */
+  origin: 'created' | 'adopted';
+  /**
+   * Whether the bucket SHOULD have an upload listener. Derived, not chosen: it
+   * is true exactly when at least one sensor archives here. The reconciler
+   * writes it; `facts.notifies_control_topic` says what S3 actually has.
+   */
+  notify: boolean;
+  created_at: string;
+  updated_at: string;
+  facts: BucketFacts;
+  sensors: Array<{ name: string; archive_enabled: boolean; prefix: string }>;
+  /**
+   * The bucket carries the cost allocation tag, read from S3 rather than from
+   * the registry — S3 is where the tag has to be for Cost Explorer to see it.
+   */
+  cost_tracked: boolean;
+}
+
+export interface StoragesResponse {
+  storages: StorageEntry[];
+  /** The stack's own console-hosting bucket. Never a sensor target. */
+  console_bucket: string | null;
+  control_topic_arn: string;
+  /** The tag the Cost page filters on, so the console can name it exactly. */
+  cost_tag: { key: string; value: string };
+  region: string;
+  fetched_at: string;
+}
+
+export interface NotificationAction {
+  bucket: string;
+  action: 'installed' | 'updated' | 'removed' | 'none';
+  archiving_sensors: number;
+  /** The key prefixes S3 now filters this bucket's uploads on. */
+  prefixes: string[];
+  error: string | null;
+}
+
+/** Result of converging each bucket's upload listener to its sensor count. */
+export interface StorageNotifyResult {
+  buckets: number;
+  installed: string[];
+  /** Rules existed but filtered on a different set of prefixes. */
+  updated: string[];
+  removed: string[];
+  actions: NotificationAction[];
+  failed: number;
+  reconciled_at: string;
+}
+
+export interface BucketListing {
+  bucket: string;
+  objects: Array<{
+    key: string;
+    size: number;
+    last_modified: string | null;
+    storage_class: string | null;
+  }>;
+  next_cursor: string | null;
+  limit: number;
+  fetched_at: string;
+}
+
+/**
+ * What every sensor mutation returns.
+ *
+ * Two reconciles, because one sensor edit can move both: `reconcile` is the
+ * sensor infrastructure (queue, subscription, consumer), and `storage` is the
+ * per-bucket S3 upload listener, whose lifecycle is a count of the sensors
+ * archiving into that bucket. Turning a sensor's archive off can be what
+ * removes a listener.
+ */
+export interface SensorMutation {
+  reconcile: ReconcileResult;
+  storage: StorageNotifyResult;
+}
+
+/** Fields a sensor's ingest configuration accepts. Omitted means unchanged. */
+export interface SensorIngestPatch {
+  stream_enabled?: boolean;
+  archive_enabled?: boolean;
+  storage_bucket?: string | null;
+  storage_prefix?: string | null;
 }
 
 export interface ReconcileAction {
@@ -288,6 +400,8 @@ export interface ReconcileResult {
   desired: string[];
   created: string[];
   deleted: string[];
+  /** Existing sensors whose queue and service were brought up to the current tags. */
+  retagged: string[];
   actions: ReconcileAction[];
   failed: number;
   reconciled_at: string;
@@ -301,6 +415,52 @@ export interface SensorsResponse {
   routing_attribute: string;
   cluster: string;
   fetched_at: string;
+}
+
+/**
+ * A consumer fleet. The three `receive_*` flags are read on hot paths by the
+ * SDSM and SPaT consumers, so each one decides what real clients are sent.
+ */
+export interface AppEntry {
+  app_id: string;
+  display_name: string | null;
+  receive_sdsm: boolean;
+  receive_spat: boolean;
+  receive_critical_spat: boolean;
+  created_at: string;
+  updated_at: string;
+  /** The Live clients page can drill into this app's fleet. */
+  inspectable: boolean;
+  /** Null when the fleet count was not fetched (past the per-page cap). */
+  connected: number | null;
+  expiring_within_60s: number | null;
+  expired_not_yet_reaped: number | null;
+  /** Registered, connectable, and subscribed to nothing. */
+  receives_nothing: boolean;
+}
+
+export interface AppsResponse {
+  apps: AppEntry[];
+  /** Configured for live-client inspection but with no registry row. */
+  unregistered_app_ids: string[];
+  total_connected: number;
+  counts_capped: boolean;
+  /**
+   * Set when the live fleet counts could not be read from Valkey. The registry
+   * itself is still accurate — only the "connected" numbers are missing.
+   */
+  counts_error: string | null;
+  /** How long a subscription change takes to reach the consumers. */
+  config_cache_ttl_seconds: number;
+  fetched_at: string;
+}
+
+/** Fields an app accepts. Omitted means unchanged. */
+export interface AppPatch {
+  display_name?: string | null;
+  receive_sdsm?: boolean;
+  receive_spat?: boolean;
+  receive_critical_spat?: boolean;
 }
 
 export type SubnetTier = 'public' | 'private-egress' | 'isolated';
@@ -369,6 +529,207 @@ export interface Me {
   email: string | null;
   role: AdminRole | null;
   groups: string[];
+}
+
+/**
+ * The GitHub App this deployment authenticates as.
+ *
+ * `configured` requires both halves: a database row AND a private key present
+ * in Secrets Manager. They can disagree — a key cleared out from under the row,
+ * or a save whose verification failed — and the page says which.
+ */
+export interface GithubApp {
+  app_id: number;
+  slug: string;
+  name: string | null;
+  html_url: string | null;
+  /** Console username. No GitHub identity is stored, so this is the audit trail. */
+  configured_by: string;
+  configured_at: string;
+  updated_at: string;
+}
+
+export interface GithubAppStatus {
+  configured: boolean;
+  secret_present: boolean;
+  app: GithubApp | null;
+  app_settings_url: string | null;
+  /**
+   * The only place a GitHub App can be deleted — GitHub has no API for it. What
+   * 'Forget App' does here is clear local credentials; the App survives there,
+   * still holding its globally-unique name.
+   */
+  app_delete_url: string | null;
+  /** What the App is called if the operator does not name it. */
+  suggested_app_name: string;
+  install_url: string | null;
+}
+
+/**
+ * One grant. Belongs to the repository owner, not to whoever clicked Install —
+ * which is what lets every later console user work without a GitHub account.
+ */
+export interface GithubInstallation {
+  installation_id: number;
+  account_login: string;
+  account_type: string | null;
+  target_type: string | null;
+  /** 'all' means a repo added later is reachable without anyone re-consenting. */
+  repository_selection: string | null;
+  permissions: Record<string, string>;
+  suspended: boolean;
+  connected_by: string;
+  connected_at: string;
+  updated_at: string;
+}
+
+export interface GithubRepo {
+  repo_id: number;
+  full_name: string;
+  owner: string;
+  name: string;
+  private: boolean;
+  default_branch: string;
+  html_url: string | null;
+  archived: boolean;
+}
+
+export interface GithubInstallationRepos {
+  installation: GithubInstallation;
+  repositories: GithubRepo[];
+  /** The installation grants more repos than could be read in one go. */
+  truncated: boolean;
+}
+
+export type MicroserviceCheckState =
+  | 'unchecked'
+  | 'ok'
+  | 'dockerfile_missing'
+  | 'branch_missing'
+  | 'context_missing'
+  | 'error';
+
+export type CapacityType = 'fargate' | 'ec2';
+export type ClusterScalingMode = 'fixed' | 'auto';
+/**
+ * 'exclusive' pins a whole GPU per task, enforced by ECS. 'shared' declares no
+ * GPU requirement so tasks pack by CPU and memory and all see the card — the
+ * only way to get finer granularity than one whole GPU, at the cost of VRAM
+ * being unguarded.
+ */
+export type GpuMode = 'shared' | 'exclusive';
+
+export interface ClusterUsage {
+  services: number;
+  max_tasks: number;
+  committed_vram_mb: number;
+  available_vram_mb: number;
+  /** Services promised more video memory than one card holds. */
+  vram_overcommitted: boolean;
+}
+
+export interface ComputeCluster {
+  name: string;
+  display_name: string | null;
+  capacity_type: CapacityType;
+  /** Null on Fargate, where there is no instance to name. */
+  instance_type: string | null;
+  /** How the INSTANCE count is decided. Meaningless on Fargate. */
+  scaling_mode: ClusterScalingMode;
+  min_instances: number;
+  max_instances: number;
+  target_capacity: number;
+  gpus_per_instance: number;
+  gpu_vram_mb: number;
+  gpu_mode: GpuMode;
+  provision_state: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  usage: ClusterUsage;
+}
+
+export interface ClusterCapacityInput {
+  capacity_type: CapacityType;
+  instance_type?: string | null;
+  scaling_mode?: ClusterScalingMode;
+  min_instances?: number;
+  max_instances?: number;
+  target_capacity?: number;
+  gpus_per_instance?: number;
+  gpu_vram_mb?: number;
+  gpu_mode?: GpuMode;
+}
+
+export type ScalingMode = 'fixed' | 'auto';
+export type ScalingMetric = 'cpu' | 'memory';
+
+/**
+ * The scaling policy, sent as one object because its rules are between the
+ * fields — a maximum below the minimum never settles, and a target at 0 or 100
+ * percent never stops scaling one way. The server validates it as a whole.
+ */
+export interface ScalingPolicy {
+  mode?: ScalingMode;
+  min_tasks?: number;
+  max_tasks?: number;
+  metric?: ScalingMetric;
+  target?: number;
+  scale_out_cooldown?: number;
+  scale_in_cooldown?: number;
+}
+
+export interface Microservice {
+  name: string;
+  display_name: string | null;
+  installation_id: number;
+  repo_id: number;
+  repo_full_name: string;
+  branch: string;
+  dockerfile_path: string;
+  build_context: string;
+  check_state: MicroserviceCheckState;
+  check_detail: string | null;
+  checked_at: string | null;
+  checked_commit_sha: string | null;
+  dockerfile_sha: string | null;
+  dockerfile_size: number | null;
+  /** 'not_provisioned' until building and ECS deployment are wired up. */
+  provision_state: string;
+  desired_count: number;
+  cpu: number;
+  memory: number;
+  container_port: number | null;
+  /** 'fixed' runs exactly desired_count; 'auto' scales between min and max. */
+  scaling_mode: ScalingMode;
+  min_tasks: number;
+  max_tasks: number;
+  scaling_metric: ScalingMetric;
+  scaling_target: number;
+  scale_out_cooldown: number;
+  scale_in_cooldown: number;
+  /** Null until assigned — a service with no cluster has nowhere to run. */
+  cluster_name: string | null;
+  gpu_vram_mb: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MicroserviceSource {
+  branch?: string;
+  dockerfile_path?: string;
+  build_context?: string;
+}
+
+export interface MicroserviceRuntime {
+  desired_count?: number;
+  cpu?: number;
+  memory?: number;
+  container_port?: number | null;
+  scaling?: ScalingPolicy;
+  cluster_name?: string | null;
+  gpu_vram_mb?: number;
 }
 
 export class ApiError extends Error {
@@ -582,26 +943,112 @@ export const api = {
   sensors: (signal?: AbortSignal) =>
     request<SensorsResponse>('GET', '/v1/admin/sensors', undefined, signal),
 
-  sensorAdd: (name: string, displayName: string | null) =>
-    request<{ reconcile: ReconcileResult }>('POST', '/v1/admin/sensors', {
+  sensorAdd: (name: string, displayName: string | null, ingest: SensorIngestPatch = {}) =>
+    request<SensorMutation>('POST', '/v1/admin/sensors', {
       name,
       display_name: displayName,
+      ...ingest,
     }),
 
+  /** Only the fields present are changed; the rest are left as they are. */
+  sensorSetIngest: (name: string, patch: SensorIngestPatch) =>
+    request<SensorMutation & { sensor: SensorEntry }>(
+      'POST',
+      `/v1/admin/sensors/${encodeURIComponent(name)}/ingest`,
+      patch
+    ),
+
   sensorSetEnabled: (name: string, enabled: boolean) =>
-    request<{ reconcile: ReconcileResult }>(
+    request<SensorMutation>(
       'POST',
       `/v1/admin/sensors/${encodeURIComponent(name)}/enabled`,
       { enabled }
     ),
 
   sensorRemove: (name: string) =>
-    request<{ reconcile: ReconcileResult }>(
-      'DELETE',
-      `/v1/admin/sensors/${encodeURIComponent(name)}`
+    request<SensorMutation>('DELETE', `/v1/admin/sensors/${encodeURIComponent(name)}`),
+
+  sensorReconcile: () => request<SensorMutation>('POST', '/v1/admin/sensors/reconcile'),
+
+  apps: (signal?: AbortSignal) =>
+    request<AppsResponse>('GET', '/v1/admin/apps', undefined, signal),
+
+  appAdd: (appId: string, displayName: string | null, subscriptions: AppPatch = {}) =>
+    request<{ app: AppEntry }>('POST', '/v1/admin/apps', {
+      app_id: appId,
+      display_name: displayName,
+      ...subscriptions,
+    }),
+
+  appUpdate: (appId: string, patch: AppPatch) =>
+    request<{ app: AppEntry }>('PATCH', `/v1/admin/apps/${encodeURIComponent(appId)}`, patch),
+
+  appRemove: (appId: string) =>
+    request<{ removed: boolean }>('DELETE', `/v1/admin/apps/${encodeURIComponent(appId)}`),
+
+  storages: (signal?: AbortSignal) =>
+    request<StoragesResponse>('GET', '/v1/admin/storages', undefined, signal),
+
+  /** Buckets in the account that are not registered yet. */
+  storagesAvailable: (signal?: AbortSignal) =>
+    request<{ buckets: Array<{ name: string; created_at: string | null }>; fetched_at: string }>(
+      'GET',
+      '/v1/admin/storages/available',
+      undefined,
+      signal
     ),
 
-  sensorReconcile: () => request<ReconcileResult>('POST', '/v1/admin/sensors/reconcile'),
+  storageAdd: (input: {
+    bucket: string;
+    display_name: string | null;
+    create: boolean;
+    cost_tracked: boolean;
+  }) =>
+    request<{ storage: StorageEntry; steps: string[]; warnings: string[] }>(
+      'POST',
+      '/v1/admin/storages',
+      input
+    ),
+
+  /**
+   * Converges every bucket's upload listener to its archiving-sensor count.
+   * Runs on its own after every sensor change; this is for drift.
+   */
+  storageReconcile: () =>
+    request<StorageNotifyResult>('POST', '/v1/admin/storages/reconcile'),
+
+  storageUpdate: (
+    bucket: string,
+    patch: { display_name?: string | null; cost_tracked?: boolean }
+  ) =>
+    request<{ storage: StorageEntry; cost_tracked: boolean }>(
+      'PATCH',
+      `/v1/admin/storages/${encodeURIComponent(bucket)}`,
+      patch
+    ),
+
+  /** Unregisters only. The bucket and everything in it survive. */
+  storageRemove: (bucket: string) =>
+    request<{ detached_sensors: string[]; notification_removed: boolean; bucket_deleted: boolean }>(
+      'DELETE',
+      `/v1/admin/storages/${encodeURIComponent(bucket)}`
+    ),
+
+  storageObjects: (
+    bucket: string,
+    params: { prefix?: string; cursor?: string; limit?: number } = {},
+    signal?: AbortSignal
+  ) =>
+    request<BucketListing>(
+      'GET',
+      `/v1/admin/storages/${encodeURIComponent(bucket)}/objects${costQuery({
+        prefix: params.prefix,
+        cursor: params.cursor,
+        limit: params.limit ? String(params.limit) : undefined,
+      })}`,
+      undefined,
+      signal
+    ),
 
   networkTopology: (refresh = false, signal?: AbortSignal) =>
     request<NetworkTopology>(
@@ -660,5 +1107,171 @@ export const api = {
       'POST',
       `/v1/admin/users/${encodeURIComponent(username)}/password`,
       { password, temporary }
+    ),
+
+  githubApp: (signal?: AbortSignal) =>
+    request<GithubAppStatus>('GET', '/v1/admin/github/app', undefined, signal),
+
+  /**
+   * Saves the App credentials. The private key goes up and never comes back —
+   * no route returns it.
+   */
+  githubSaveApp: (input: { app_id: number; private_key: string; webhook_secret?: string | null }) =>
+    request<{ app: GithubApp; events: string[]; permissions: Record<string, string> }>(
+      'POST',
+      '/v1/admin/github/app',
+      input
+    ),
+
+  /**
+   * Starts one-click App creation: returns the manifest describing the App this
+   * deployment needs, and the GitHub URL a form posts it to.
+   *
+   * The browser does the POST because GitHub renders a consent page — only a
+   * person may create an App, so there is no server-to-server equivalent. The
+   * manifest is serialised server-side so the console cannot alter the
+   * permissions being requested.
+   */
+  githubManifestIntent: (organization?: string | null, appName?: string | null) =>
+    request<{ create_url: string; manifest: string; state: string; expires_at: string }>(
+      'POST',
+      '/v1/admin/github/app/manifest-intent',
+      { organization: organization ?? null, app_name: appName ?? null }
+    ),
+
+  /**
+   * Redeems GitHub's App-creation code for the credentials and stores them.
+   * The code is single-use and expires in an hour.
+   */
+  githubCompleteManifest: (input: { code: string; state: string }) =>
+    request<{ app: GithubApp; events: string[]; permissions: Record<string, string> }>(
+      'POST',
+      '/v1/admin/github/app/from-manifest',
+      input
+    ),
+
+  githubForgetApp: () =>
+    request<{ forgotten: boolean }>('DELETE', '/v1/admin/github/app'),
+
+  /**
+   * Starts an install handshake and returns GitHub's own installation URL.
+   *
+   * The `state` in that URL is single-use and expires; GitHub hands it back on
+   * the redirect, and it is what proves the installation being claimed came
+   * from a flow this deployment started.
+   */
+  githubInstallIntent: () =>
+    request<{ install_url: string; state: string; expires_at: string }>(
+      'POST',
+      '/v1/admin/github/install-intent'
+    ),
+
+  githubInstallations: (signal?: AbortSignal) =>
+    request<{ installations: GithubInstallation[] }>(
+      'GET',
+      '/v1/admin/github/installations',
+      undefined,
+      signal
+    ),
+
+  /** Completes the handshake. Called by the callback page, with a live session. */
+  githubCompleteInstall: (input: { installation_id: number; state: string }) =>
+    request<GithubInstallationRepos>('POST', '/v1/admin/github/installations', input),
+
+  githubInstallationRepos: (installationId: number, signal?: AbortSignal) =>
+    request<GithubInstallationRepos>(
+      'GET',
+      `/v1/admin/github/installations/${installationId}/repositories`,
+      undefined,
+      signal
+    ),
+
+  /** `revoke` also uninstalls the App on GitHub, so it stops appearing there. */
+  githubRemoveInstallation: (installationId: number, revoke = false) =>
+    request<{ removed: boolean; revoked: boolean; revoke_error: string | null }>(
+      'DELETE',
+      `/v1/admin/github/installations/${installationId}${revoke ? '?revoke=true' : ''}`
+    ),
+
+  clusters: (signal?: AbortSignal) =>
+    request<{ clusters: ComputeCluster[]; fetched_at: string }>(
+      'GET',
+      '/v1/admin/clusters',
+      undefined,
+      signal
+    ),
+
+  clusterCreate: (input: {
+    name: string;
+    display_name: string | null;
+    capacity: ClusterCapacityInput;
+  }) => request<{ cluster: ComputeCluster }>('POST', '/v1/admin/clusters', input),
+
+  clusterUpdate: (
+    name: string,
+    input: { display_name?: string | null; capacity: ClusterCapacityInput }
+  ) =>
+    request<{ cluster: ComputeCluster }>(
+      'PATCH',
+      `/v1/admin/clusters/${encodeURIComponent(name)}`,
+      input
+    ),
+
+  clusterRemove: (name: string) =>
+    request<{ removed: boolean }>('DELETE', `/v1/admin/clusters/${encodeURIComponent(name)}`),
+
+  microservices: (signal?: AbortSignal) =>
+    request<{ microservices: Microservice[] }>(
+      'GET',
+      '/v1/admin/microservices',
+      undefined,
+      signal
+    ),
+
+  /**
+   * Registers a microservice. Refused unless the Dockerfile is actually there —
+   * the source is checked against GitHub before anything is stored.
+   */
+  microserviceCreate: (
+    input: {
+      name: string;
+      display_name?: string | null;
+      installation_id: number;
+      repo_id: number;
+    } & MicroserviceSource &
+      MicroserviceRuntime
+  ) =>
+    request<{ microservice: Microservice; repo: GithubRepo }>(
+      'POST',
+      '/v1/admin/microservices',
+      input
+    ),
+
+  /** Anything omitted is left alone. A failed re-check leaves the row unchanged. */
+  microserviceUpdate: (
+    name: string,
+    changes: {
+      display_name?: string | null;
+      repo_id?: number;
+    } & MicroserviceSource &
+      MicroserviceRuntime
+  ) =>
+    request<{ microservice: Microservice; rechecked: boolean }>(
+      'PATCH',
+      `/v1/admin/microservices/${encodeURIComponent(name)}`,
+      changes
+    ),
+
+  /** Re-reads the source. Reports a bad result rather than failing on it. */
+  microserviceCheck: (name: string) =>
+    request<{ microservice: Microservice }>(
+      'POST',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/check`
+    ),
+
+  microserviceRemove: (name: string) =>
+    request<{ name: string; removed: boolean; infrastructure_removed: boolean }>(
+      'DELETE',
+      `/v1/admin/microservices/${encodeURIComponent(name)}`
     ),
 };

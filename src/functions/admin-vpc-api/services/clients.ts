@@ -61,17 +61,30 @@ export function configuredApps(): string[] {
     .filter((id) => id.length > 0);
 }
 
+export interface FleetCount {
+  app_id: string;
+  connected: number;
+  expiring_within_60s: number;
+  expired_not_yet_reaped: number;
+}
+
 /**
- * Fleet counts per app. ZCARD is constant time and ZCOUNT is logarithmic, so
- * this endpoint's cost does not grow with the number of connected clients —
- * which is the whole reason the page leads with counts rather than a list.
+ * Fleet counts for a known list of apps.
+ *
+ * ZCARD is constant time and ZCOUNT is logarithmic, so the cost does not grow
+ * with the number of connected clients — which is the whole reason the pages
+ * that use this lead with counts rather than a list.
+ *
+ * The caller supplies the app list; nothing here discovers one. That is the
+ * standing rule for console reads against this Valkey: it is shared with the
+ * latency-sensitive SPaT broadcast path, and no console request may issue an
+ * unbounded command.
  */
-export async function getSummary() {
-  const apps = configuredApps();
+export async function fleetCounts(appIds: string[]): Promise<FleetCount[]> {
   const now = Math.floor(Date.now() / 1000);
 
-  const rows = await Promise.all(
-    apps.map(async (appId) => {
+  return Promise.all(
+    appIds.map(async (appId) => {
       const [connected, expiringSoon, overdue] = await Promise.all([
         sendValkeyArrayCommand(['ZCARD', geoKey(appId)]),
         sendValkeyArrayCommand(['ZCOUNT', expiryKey(appId), String(now), String(now + 60)]),
@@ -86,6 +99,11 @@ export async function getSummary() {
       };
     })
   );
+}
+
+/** Fleet counts for the apps named in configuration. */
+export async function getSummary() {
+  const rows = await fleetCounts(configuredApps());
 
   return LiveClientsSummaryResponseSchema.parse({
     zone_id: ZONE_ID,

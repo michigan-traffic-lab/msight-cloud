@@ -22,6 +22,7 @@ import {
   GetQueueUrlCommand,
   ListQueueTagsCommand,
   ListQueuesCommand,
+  TagQueueCommand,
   SQSClient,
 } from '@aws-sdk/client-sqs';
 import {
@@ -38,9 +39,11 @@ import {
   ECSClient,
   ListServicesCommand,
   RegisterTaskDefinitionCommand,
+  TagResourceCommand,
   UpdateServiceCommand,
 } from '@aws-sdk/client-ecs';
 import { DEPLOYMENT_TAG_KEY, SENSOR_TAG_KEY, sensorQueueName, sensorServiceName } from './deployment-naming';
+import { resourceTags, toEcsTags, toSqsTags, type TagPairs } from './resource-tags';
 
 export const sqs = new SQSClient({});
 export const sns = new SNSClient({});
@@ -59,6 +62,18 @@ export interface SensorInfraConfig {
   templateTaskDefinition: string;
   subnetIds: string[];
   securityGroupIds: string[];
+  /**
+   * The cost allocation tag the console's Cost page filters on.
+   *
+   * `cdk.Tags.of(stack)` only reaches resources CloudFormation owns, and none
+   * of these are — so without applying it here a sensor's queue and, far more
+   * expensively, its Fargate task are invisible to cost reporting. The tag
+   * cannot be hardcoded: it is chosen in deploy.config.yaml.
+   *
+   * Optional only because the teardown reaper never tags anything; every
+   * creating caller must supply it.
+   */
+  costTag?: { key: string; value: string };
 }
 
 export interface SensorAction {
@@ -69,26 +84,26 @@ export interface SensorAction {
 }
 
 /**
- * Every runtime-created resource carries these, and teardown enumerates by
- * them. The deployment tag is what stops one stack's reaper from reaping
- * another's queues in a shared account.
+ * What every resource behind one sensor carries.
+ *
+ * The base set and the per-service shapes live in `./resource-tags`, shared
+ * with storage — the two were separate copies once, and the cost allocation tag
+ * was added to one of them and missed on the other.
  */
-function tagPairs(deployment: string, sensor: string): Array<[string, string]> {
-  return [
-    [DEPLOYMENT_TAG_KEY, deployment],
-    [SENSOR_TAG_KEY, sensor],
-    ['ManagedBy', 'msight-console'],
-  ];
+export function tagPairs(config: SensorInfraConfig, sensor: string): TagPairs {
+  return resourceTags({
+    deployment: config.deployment,
+    specific: [[SENSOR_TAG_KEY, sensor]],
+    costTag: config.costTag,
+  });
 }
 
-/** SQS takes a plain map. */
-function sqsTags(deployment: string, sensor: string): Record<string, string> {
-  return Object.fromEntries(tagPairs(deployment, sensor));
+function sqsTags(config: SensorInfraConfig, sensor: string): Record<string, string> {
+  return toSqsTags(tagPairs(config, sensor));
 }
 
-/** ECS spells tag fields in lowercase, unlike SQS and SNS. */
-function ecsTags(deployment: string, sensor: string) {
-  return tagPairs(deployment, sensor).map(([key, value]) => ({ key, value }));
+function ecsTags(config: SensorInfraConfig, sensor: string) {
+  return toEcsTags(tagPairs(config, sensor));
 }
 
 /**
@@ -113,15 +128,27 @@ export function sensorFromQueueName(prefix: string, queueName: string): string {
   return queueName.replace(new RegExp(`^${prefix}-`), '').replace(/\.fifo$/, '');
 }
 
+export interface OwnedQueue {
+  url: string;
+  tags: Record<string, string>;
+}
+
 /**
- * Queue name to URL, for every queue this deployment owns.
+ * Queue name to URL and tags, for every queue this deployment owns.
  *
  * Ownership comes from the tag, not the name prefix. Two deployments can
  * legitimately share a prefix — one pins the other's names in config — and
  * deleting another deployment's queue is unrecoverable.
+ *
+ * The tags are returned rather than discarded because the ownership check has
+ * already paid for them, and tag convergence needs to know which queues are
+ * missing the cost allocation tag. Fetching them twice would double the
+ * ListQueueTags calls on a path that already makes one per queue.
  */
-export async function listOwnedQueueUrls(config: SensorInfraConfig): Promise<Map<string, string>> {
-  const found = new Map<string, string>();
+export async function listOwnedQueueUrls(
+  config: SensorInfraConfig
+): Promise<Map<string, OwnedQueue>> {
+  const found = new Map<string, OwnedQueue>();
   let nextToken: string | undefined;
 
   do {
@@ -138,7 +165,7 @@ export async function listOwnedQueueUrls(config: SensorInfraConfig): Promise<Map
         throw error;
       }
       if (tags.Tags?.[DEPLOYMENT_TAG_KEY] !== config.deployment) continue;
-      found.set(url.split('/').pop() ?? '', url);
+      found.set(url.split('/').pop() ?? '', { url, tags: tags.Tags ?? {} });
     }
     nextToken = page.NextToken;
   } while (nextToken);
@@ -161,7 +188,7 @@ export async function queueDepths(
 ): Promise<Map<string, QueueDepth>> {
   const depths = new Map<string, QueueDepth>();
 
-  for (const [queueName, url] of await listOwnedQueueUrls(config)) {
+  for (const [queueName, { url }] of await listOwnedQueueUrls(config)) {
     try {
       const attributes = await sqs.send(
         new GetQueueAttributesCommand({
@@ -261,7 +288,7 @@ async function registerTaskDefinition(
       executionRoleArn: base.executionRoleArn,
       taskRoleArn: base.taskRoleArn,
       runtimePlatform: base.runtimePlatform,
-      tags: ecsTags(config.deployment, sensor),
+      tags: ecsTags(config, sensor),
     })
   );
 
@@ -297,7 +324,7 @@ export async function createSensorInfrastructure(
           DeduplicationScope: 'messageGroup',
           FifoThroughputLimit: 'perMessageGroupId',
         },
-        tags: sqsTags(config.deployment, sensor),
+        tags: sqsTags(config, sensor),
       })
     );
     const queueUrl = created.QueueUrl;
@@ -366,7 +393,7 @@ export async function createSensorInfrastructure(
           // unless this is set — without it the sensor's spend is invisible to
           // the cost allocation tag.
           propagateTags: 'SERVICE',
-          tags: ecsTags(config.deployment, sensor),
+          tags: ecsTags(config, sensor),
           enableExecuteCommand: true,
         })
       );
@@ -462,9 +489,106 @@ export interface ConvergeResult {
   desired: string[];
   created: string[];
   deleted: string[];
+  /** Sensors whose existing resources were brought up to the current tag set. */
+  retagged: string[];
   actions: SensorAction[];
   failed: number;
   reconciled_at: string;
+}
+
+/**
+ * Brings the tags on already-existing sensor resources up to date.
+ *
+ * Creation is not enough on its own. `CreateQueue` ignores the tags argument
+ * when the queue already exists, and an existing service takes the
+ * `UpdateService` branch, which does not tag — so a sensor built before a tag
+ * was introduced keeps the old set forever. Adding the cost allocation tag to
+ * the creation path alone would therefore have fixed nothing on any deployment
+ * that already has sensors, which is every deployment that matters.
+ *
+ * Convergent rather than one-shot: it reads what is actually on each resource
+ * and acts only on a difference, so the steady state is a single
+ * DescribeServices per reconcile and no writes at all.
+ *
+ * The force-new-deployment is the subtle part. `propagateTags: 'SERVICE'` copies
+ * the service's tags onto tasks *at launch*, so tagging a service leaves the
+ * tasks already running with the old set — and on Fargate the task is where
+ * nearly all the money is. Restarting them is what actually moves the spend
+ * into the cost report. It happens once, because the next reconcile sees the
+ * tag present and does nothing.
+ */
+async function convergeTags(
+  config: SensorInfraConfig,
+  sensors: string[],
+  queues: Map<string, OwnedQueue>
+): Promise<{ retagged: string[]; actions: SensorAction[] }> {
+  const retagged: string[] = [];
+  const actions: SensorAction[] = [];
+  if (!config.costTag || sensors.length === 0) return { retagged, actions };
+
+  const costTag = config.costTag;
+  const serviceOf = new Map(sensors.map((s) => [sensorServiceName(config.prefix, s), s]));
+
+  // DescribeServices accepts at most 10 services per call.
+  const described = new Map<string, { arn: string; tags: Record<string, string> }>();
+  const names = [...serviceOf.keys()];
+  for (let index = 0; index < names.length; index += 10) {
+    const batch = names.slice(index, index + 10);
+    const result = await ecs.send(
+      new DescribeServicesCommand({ cluster: config.cluster, services: batch, include: ['TAGS'] })
+    );
+    for (const service of result.services ?? []) {
+      if (!service.serviceName || !service.serviceArn) continue;
+      described.set(service.serviceName, {
+        arn: service.serviceArn,
+        tags: Object.fromEntries(
+          (service.tags ?? []).map((tag) => [tag.key ?? '', tag.value ?? ''])
+        ),
+      });
+    }
+  }
+
+  for (const sensor of sensors) {
+    const steps: string[] = [];
+    try {
+      const queue = queues.get(sensorQueueName(config.prefix, sensor));
+      if (queue && queue.tags[costTag.key] !== costTag.value) {
+        await sqs.send(
+          new TagQueueCommand({ QueueUrl: queue.url, Tags: sqsTags(config, sensor) })
+        );
+        steps.push('queue tagged');
+      }
+
+      const service = described.get(sensorServiceName(config.prefix, sensor));
+      if (service && service.tags[costTag.key] !== costTag.value) {
+        await ecs.send(
+          new TagResourceCommand({ resourceArn: service.arn, tags: ecsTags(config, sensor) })
+        );
+        await ecs.send(
+          new UpdateServiceCommand({
+            cluster: config.cluster,
+            service: sensorServiceName(config.prefix, sensor),
+            forceNewDeployment: true,
+          })
+        );
+        steps.push('service tagged, tasks restarting to inherit it');
+      }
+
+      if (steps.length > 0) retagged.push(sensor);
+    } catch (error) {
+      // Never fatal. Tags are a reporting concern; a sensor that processes
+      // messages but is missing from the cost breakdown is a far better outcome
+      // than a reconcile that abandons the rest of its work over one of them.
+      actions.push({
+        sensor,
+        action: 'none',
+        steps,
+        error: error instanceof Error ? error.message : 'Unknown failure.',
+      });
+    }
+  }
+
+  return { retagged, actions };
 }
 
 /**
@@ -483,7 +607,8 @@ export async function converge(
   const desiredQueues = new Map(
     desired.map((sensor) => [sensorQueueName(config.prefix, sensor), sensor])
   );
-  const actual = await listOwnedQueues(config);
+  const queues = await listOwnedQueueUrls(config);
+  const actual = new Set(queues.keys());
   const services = await listClusterServices(config);
 
   // A sensor needs work when EITHER half is missing, not just the queue.
@@ -512,6 +637,12 @@ export async function converge(
     actions.push(await createSensorInfrastructure(config, sensor));
   }
 
+  // Only the sensors left alone above. Anything just created already carries
+  // the current tags, and anything just deleted has nothing to tag.
+  const untouched = desired.filter((sensor) => !toCreate.includes(sensor));
+  const tagging = await convergeTags(config, untouched, queues);
+  actions.push(...tagging.actions);
+
   const failed = actions.filter((action) => action.error !== null).length;
 
   // Each failure is logged on its own line with the steps that did succeed.
@@ -537,6 +668,7 @@ export async function converge(
       desired: desired.length,
       created: toCreate.length,
       deleted: toDelete.length,
+      retagged: tagging.retagged.length,
       failed,
     })
   );
@@ -545,6 +677,7 @@ export async function converge(
     desired,
     created: toCreate,
     deleted: toDelete,
+    retagged: tagging.retagged,
     actions,
     failed,
     reconciled_at: new Date().toISOString(),

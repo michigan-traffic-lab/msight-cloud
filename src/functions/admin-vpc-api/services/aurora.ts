@@ -1,14 +1,11 @@
-import { Pool, type PoolClient } from 'pg';
-import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { type PoolClient } from 'pg';
 import {
   AuroraQueryResponseSchema,
   AuroraRowsResponseSchema,
   AuroraTablesResponseSchema,
 } from '../../../shared/schemas/admin';
 import { HttpError } from '../../../shared/admin-api/http';
-
-const secretsClient = new SecretsManagerClient({});
-let poolPromise: Promise<Pool> | null = null;
+import { getPool } from './db';
 
 /**
  * Columns an operator may change, by table.
@@ -37,55 +34,6 @@ const DELETABLE_TABLES = new Set(['apps', 'maps']);
 const MAX_ROWS = 200;
 const DEFAULT_ROWS = 50;
 const STATEMENT_TIMEOUT_MS = 10_000;
-
-async function loadCredentials(): Promise<{ username: string; password: string }> {
-  const secretArn = process.env.DB_SECRET_ARN;
-  if (!secretArn) throw new HttpError(500, 'not_configured', 'DB_SECRET_ARN is not set.');
-
-  const result = await secretsClient.send(new GetSecretValueCommand({ SecretId: secretArn }));
-  if (!result.SecretString) {
-    throw new HttpError(500, 'not_configured', 'Database secret has no SecretString.');
-  }
-
-  const parsed = JSON.parse(result.SecretString) as { username?: unknown; password?: unknown };
-  if (typeof parsed.username !== 'string' || typeof parsed.password !== 'string') {
-    throw new HttpError(500, 'not_configured', 'Database secret is missing username/password.');
-  }
-  return { username: parsed.username, password: parsed.password };
-}
-
-async function getPool(): Promise<Pool> {
-  if (!poolPromise) {
-    poolPromise = (async () => {
-      try {
-        const host = process.env.DB_HOST;
-        const database = process.env.DB_NAME;
-        if (!host || !database) {
-          throw new HttpError(500, 'not_configured', 'DB_HOST / DB_NAME are not set.');
-        }
-
-        const { username, password } = await loadCredentials();
-        const pool = new Pool({
-          host,
-          port: Number(process.env.DB_PORT ?? '5432'),
-          database,
-          user: username,
-          password,
-          ssl: { rejectUnauthorized: false },
-          max: 2,
-          idleTimeoutMillis: 30_000,
-          connectionTimeoutMillis: 5_000,
-        });
-        pool.on('error', (error) => console.error('admin-vpc-api pg pool error', error));
-        return pool;
-      } catch (error) {
-        poolPromise = null;
-        throw error;
-      }
-    })();
-  }
-  return poolPromise;
-}
 
 /**
  * Runs `work` inside a transaction that Postgres itself refuses to let write.

@@ -15,6 +15,7 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
 import { logRetentionFromContext } from './log-retention';
@@ -34,6 +35,7 @@ import {
   sensorQueueName,
   type ResourceNameOverrides,
 } from '../src/shared/deployment-naming';
+import { VPC_ROUTE_PREFIXES } from '../src/shared/admin-api/vpc-route-prefixes';
 
 function collectTypeScriptFiles(rootDir: string): string[] {
   const filePaths: string[] = [];
@@ -1027,11 +1029,49 @@ export class MsightCloudStack extends cdk.Stack {
     // CONVENTION: publishers MUST set an `event_type` String MessageAttribute,
     // and every subscription MUST carry a filter policy on it — a subscription
     // without one receives every control event. Payloads stay small JSON.
+    //
+    // S3 is the one publisher that cannot follow the convention: bucket event
+    // notifications carry no message attributes, and S3 offers no way to add
+    // any. A subscriber that wants only S3 events must therefore discriminate
+    // on the payload — an S3 notification is a JSON object with a `Records`
+    // array whose entries have `eventSource: "aws:s3"`.
+    //
+    // Nothing in this stack subscribes to those events today. That is
+    // deliberate: storage management owns the PUBLISHING side only. Note the
+    // consequence — SNS does not buffer, so an event published with no matching
+    // subscription is discarded, not queued. A subscriber added later sees only
+    // what arrives after it exists; earlier uploads have to be recovered by
+    // listing the bucket. Which sensor a key belongs to is recoverable at any
+    // time from `sensors.storage_bucket` / `storage_prefix`.
     // -------------------------
     const controlTopic = new sns.Topic(this, 'MsightControlTopic', {
       topicName: name.controlTopic,
       displayName: 'MSight Control Channel',
     });
+
+    /**
+     * Lets S3 publish upload notifications here.
+     *
+     * Conditioned on the source *account* rather than a source bucket ARN
+     * because storage buckets are registered at runtime from the console, so no
+     * list of them exists at synth time. The account condition is what stops a
+     * bucket in someone else's account from being pointed at this topic.
+     *
+     * This statement is also load-bearing for registration itself:
+     * PutBucketNotificationConfiguration sends a test event to prove the
+     * destination is reachable and refuses the configuration outright if it is
+     * not, so without this every attempt to register a bucket fails.
+     */
+    controlTopic.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowS3UploadNotifications',
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.ServicePrincipal('s3.amazonaws.com')],
+        actions: ['sns:Publish'],
+        resources: [controlTopic.topicArn],
+        conditions: { StringEquals: { 'aws:SourceAccount': cdk.Aws.ACCOUNT_ID } },
+      })
+    );
 
     new cdk.CfnOutput(this, 'ControlTopicArn', {
       value: controlTopic.topicArn,
@@ -1634,6 +1674,70 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     // -------------------------
+    // GitHub App credentials
+    //
+    // The App ID, its PEM private key, and the webhook secret. Written by the
+    // console at runtime — an admin pastes them once on the Microservices page —
+    // and read only by the github-api function below.
+    //
+    // CloudFormation deliberately never carries the real value: putting a
+    // private key in a template would expose it to anyone with stack read
+    // access, which is the same mistake `masterPassword` already documents.
+    // What the template creates is a throwaway placeholder, and the first save
+    // supersedes it with a new secret version. Later deploys leave that version
+    // alone, because `generateSecretString` applies at creation only.
+    // -------------------------
+    const githubAppSecret = new secretsmanager.Secret(this, 'GithubAppSecret', {
+      secretName: `${deployment}/github-app`,
+      description:
+        'GitHub App credentials for the MSight console: app_id, private_key (PEM) and ' +
+        'webhook_secret. Written through the console, never by CloudFormation.',
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({}),
+        generateStringKey: 'placeholder',
+      },
+      // The credentials can be re-pasted from the GitHub App settings page, so
+      // holding a deleted stack's secret for the recovery window would block a
+      // redeploy from reusing the name for nothing.
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // -------------------------
+    // GitHub transport (outside the VPC)
+    //
+    // This stack runs `natGateways: 0` with its Lambdas in PRIVATE_ISOLATED
+    // subnets, so the in-VPC admin function — the only one that can reach
+    // Aurora — has no route to api.github.com and will not have one without
+    // paying for a NAT gateway. This function is the mirror image: internet
+    // access, no database, no VPC.
+    //
+    // It is invoked only by the in-VPC function, over the Lambda interface
+    // endpoint already provisioned above, and is deliberately NOT attached to
+    // any API Gateway route. Nothing outside this account can reach it, which
+    // is why it carries no authorizer of its own.
+    // -------------------------
+    const githubApiLambda = new NodejsFunction(this, 'GithubApiLambda', {
+      logGroup: new logs.LogGroup(this, 'GithubApiLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/github-api`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+      ...publicLambdaProps,
+      entry: path.join(__dirname, '../src/functions/github-api/handler.ts'),
+      handler: 'handler',
+      // Verifying a source is three GitHub calls at up to 8s each, and the
+      // in-VPC caller waits on the whole thing.
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        SERVICE_NAME: 'github-api',
+        BUILD_ID: buildId,
+        GITHUB_APP_SECRET_ARN: githubAppSecret.secretArn,
+      },
+    });
+
+    githubAppSecret.grantRead(githubApiLambda);
+
+    // -------------------------
     // Admin API — in-VPC half
     //
     // Valkey and Aurora are reachable only from inside the VPC, so the routes
@@ -1670,6 +1774,11 @@ export class MsightCloudStack extends cdk.Stack {
         // Apps whose client fleets the console can inspect. Sourced from config
         // rather than discovered, so the console never scans the keyspace.
         CLIENT_APP_IDS: ((this.node.tryGetContext('clientAppIds') ?? []) as string[]).join(','),
+        // Not used for caching here — the console reads Aurora directly. It is
+        // how long the SDSM and SPaT consumers hold their cached app list, and
+        // therefore how long a subscription change takes to take effect. The
+        // Apps page states that delay rather than leaving it to be discovered.
+        CONFIG_CACHE_TTL_SECONDS: configCacheTtlSeconds,
         DEPLOYMENT_NAME: deployment,
         SENSOR_RESOURCE_PREFIX: name.sensorResourcePrefix,
         SENSOR_TOPIC_ARN: sensorTopic.topicArn,
@@ -1677,10 +1786,40 @@ export class MsightCloudStack extends cdk.Stack {
         SENSOR_TASK_DEFINITION: sensorTaskTemplate.family,
         SENSOR_SUBNET_IDS: vpc.selectSubnets(appSubnetSelection).subnetIds.join(','),
         SENSOR_SECURITY_GROUP_IDS: lambdaSg.securityGroupId,
+        // Where a registered storage bucket sends its upload notifications.
+        CONTROL_TOPIC_ARN: controlTopic.topicArn,
+        // Sensor queues, ECS services and storage buckets are all created at
+        // runtime, so `cdk.Tags.of(this)` never reaches them. This function is
+        // what applies the cost allocation tag to them, and without it their
+        // spend — Fargate above all — is missing from the Cost page.
+        COST_TAG_KEY: costAllocationTagKey,
+        COST_TAG_VALUE: stackTags[costAllocationTagKey],
+        // Named so the storage registry can refuse it. It is CloudFormation's,
+        // holds console build output, and is emptied on stack deletion — the
+        // last place sensor data should be written.
+        CONSOLE_BUCKET_NAME: consoleBucket.bucketName,
+        // GitHub. This function owns the routes and the tables; it reaches
+        // github.com only by invoking the transport function, because its own
+        // subnets have no egress.
+        GITHUB_API_FUNCTION_NAME: githubApiLambda.functionName,
+        GITHUB_APP_SECRET_ARN: githubAppSecret.secretArn,
+        // These two go into the App manifest GitHub creates the App from, which
+        // is what removes the manual registration: nobody types a setup URL or
+        // a webhook URL any more. They are the same values the GithubAppSetupUrl
+        // and GithubWebhookUrl outputs print, and must stay in step with them.
+        CONSOLE_URL: consoleUrl,
+        GITHUB_WEBHOOK_URL: `${httpApi.apiEndpoint}/v1/github/webhook`,
       },
     });
 
     cluster.secret!.grantRead(adminVpcApiLambda);
+
+    // Write, because saving the App credentials is a console action. Read, so
+    // the console can report whether a key is actually present rather than
+    // inferring it from the database row — the two disagreeing is diagnostic.
+    githubAppSecret.grantRead(adminVpcApiLambda);
+    githubAppSecret.grantWrite(adminVpcApiLambda);
+    githubApiLambda.grantInvoke(adminVpcApiLambda);
 
     // Sensor reconciliation: creates and deletes the per-sensor queue,
     // subscription, task definition and service.
@@ -1774,6 +1913,52 @@ export class MsightCloudStack extends cdk.Stack {
         conditions: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } },
       })
     );
+
+    /**
+     * Storage registry: creating buckets, adopting existing ones, and wiring
+     * their upload notifications at the control topic.
+     *
+     * Unscoped by resource, unavoidably. Adoption means an operator names a
+     * bucket that already exists — one this stack did not create and whose name
+     * follows no convention we control — so there is no ARN pattern to write
+     * here that would not break the feature.
+     *
+     * The narrowing that IS possible is by action, and it is done strictly:
+     * these are bucket *configuration* rights only. There is no s3:DeleteBucket
+     * (so the console cannot destroy a bucket), no s3:GetObject or
+     * s3:DeleteObject (so it cannot read or remove what a sensor uploaded), and
+     * no s3:PutObject. The most it can do to data is list the keys.
+     */
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          's3:CreateBucket',
+          's3:GetBucketLocation',
+          's3:GetBucketTagging',
+          's3:PutBucketTagging',
+          's3:GetBucketNotification',
+          's3:PutBucketNotification',
+          's3:GetBucketPublicAccessBlock',
+          's3:PutBucketPublicAccessBlock',
+          's3:GetEncryptionConfiguration',
+          's3:PutEncryptionConfiguration',
+          's3:GetBucketVersioning',
+          // Covers both HeadBucket and the object listing the console shows.
+          's3:ListBucket',
+        ],
+        resources: [`arn:${cdk.Aws.PARTITION}:s3:::*`],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        // ListAllMyBuckets is account-wide and takes no resource. It backs the
+        // "adopt an existing bucket" picker; without it an operator would have
+        // to type bucket names from memory.
+        actions: ['s3:ListAllMyBuckets'],
+        resources: ['*'],
+      })
+    );
+
 
     // -------------------------
     // Teardown reaper
@@ -1964,15 +2149,40 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
 
+    /**
+     * `scopePermissionToRoute: false` is load-bearing, not a tidy-up.
+     *
+     * By default this integration adds one `AWS::Lambda::Permission` per route,
+     * each with that route's exact ARN. The admin API points many routes at two
+     * functions — six path prefixes, each in bare and greedy form, across five
+     * methods — so the default put roughly sixty statements into one function's
+     * resource policy and blew Lambda's hard 20 KB policy limit, failing the
+     * deploy on whichever permission happened to cross it. Nothing warns before
+     * that; the limit is only enforced at CreatePermission.
+     *
+     * With this off, each function gets a single permission covering the whole
+     * API (`apiId/*` — any stage, method and path). That is broader than
+     * per-route, and deliberately acceptable here: both functions sit behind the
+     * same API and the same JWT authorizer, the only principal is API Gateway,
+     * and a path neither router serves still 404s. The alternative — policy size
+     * growing with every page added — fails a deploy for a reason that has
+     * nothing to do with the page being added.
+     */
     const adminVpcIntegration = new HttpLambdaIntegration(
       'AdminVpcApiIntegration',
-      adminVpcApiLambda
+      adminVpcApiLambda,
+      { scopePermissionToRoute: false }
     );
 
     // More specific than the catch-all below, so API Gateway prefers these.
     // Both the bare prefix and its children are needed — a greedy path variable
     // does not match the prefix on its own.
-    for (const prefix of ['clients', 'db', 'maps', 'sensors']) {
+    //
+    // The list comes from src/shared/admin-api/vpc-route-prefixes rather than
+    // being written out here, because a prefix missing from it does not fail:
+    // the request quietly matches the catch-all, lands on the out-of-VPC
+    // function, and 404s. A test pins the list against the in-VPC router.
+    for (const prefix of VPC_ROUTE_PREFIXES) {
       for (const routePath of [`/v1/admin/${prefix}`, `/v1/admin/${prefix}/{proxy+}`]) {
         adminApi.addRoutes({
           path: routePath,
@@ -2006,7 +2216,11 @@ export class MsightCloudStack extends cdk.Stack {
         apigwv2.HttpMethod.PATCH,
         apigwv2.HttpMethod.DELETE,
       ],
-      integration: new HttpLambdaIntegration('AdminApiIntegration', adminApiLambda),
+      // Same reasoning as the in-VPC integration above: one permission for the
+      // whole API rather than one per method on the catch-all.
+      integration: new HttpLambdaIntegration('AdminApiIntegration', adminApiLambda, {
+        scopePermissionToRoute: false,
+      }),
     });
 
     // -------------------------
@@ -2087,6 +2301,32 @@ export class MsightCloudStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AdminConsoleDistributionId', {
       value: consoleDistribution.distributionId,
       description: 'CloudFront distribution to invalidate after upload. Used by deploy.js.',
+    });
+
+    // The two values needed to register the GitHub App, which is a one-time
+    // manual step on github.com. Both are derived from the console URL, and
+    // getting either wrong fails at the end of the install flow rather than at
+    // the start, so they are printed rather than left to be worked out.
+    new cdk.CfnOutput(this, 'GithubAppSetupUrl', {
+      value: `${consoleUrl}/settings/github/callback`,
+      description:
+        'Set this as BOTH the GitHub App\'s Setup URL and its Callback URL, with ' +
+        '"Redirect on update" enabled. It points at the static console rather than the ' +
+        'admin API because GitHub redirects a browser, which carries no Cognito token.',
+    });
+
+    new cdk.CfnOutput(this, 'GithubWebhookUrl', {
+      value: `${httpApi.apiEndpoint}/v1/github/webhook`,
+      description:
+        'Where the GitHub App should send push events. Not served yet — this is the ' +
+        'public API, so the receiver will authenticate by HMAC signature, not Cognito.',
+    });
+
+    new cdk.CfnOutput(this, 'GithubAppSecretName', {
+      value: githubAppSecret.secretName,
+      description:
+        'Secrets Manager secret holding the GitHub App private key. Written by the ' +
+        'console; never populated by CloudFormation.',
     });
 
     if (cacheDebugLambda) {

@@ -68,6 +68,18 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
         component: () => import('@/pages/SensorsPage.vue'),
       },
       {
+        name: 'apps',
+        path: 'apps',
+        label: 'Apps',
+        title: 'Apps',
+        icon: 'apps',
+        minRole: 'viewer',
+        subtitle:
+          'Consumer fleets and what each one is subscribed to receive: SDSM, SPaT, critical SPaT.',
+        status: 'ready',
+        component: () => import('@/pages/AppsPage.vue'),
+      },
+      {
         name: 'clients',
         path: 'clients',
         label: 'Live clients',
@@ -124,6 +136,18 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
     label: 'Data',
     features: [
       {
+        name: 'storage',
+        path: 'storage',
+        label: 'Storage',
+        title: 'Storage',
+        icon: 'inventory_2',
+        minRole: 'viewer',
+        subtitle:
+          'S3 buckets holding aggregated sensor data, and what each sensor has uploaded.',
+        status: 'ready',
+        component: () => import('@/pages/StoragePage.vue'),
+      },
+      {
         name: 'maps',
         path: 'maps',
         label: 'Maps',
@@ -139,6 +163,44 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
   {
     label: 'Infrastructure',
     features: [
+      {
+        name: 'clusters',
+        path: 'clusters',
+        label: 'Clusters',
+        title: 'Compute clusters',
+        // Classic Material Icons only — see the note on the Services icon
+        // below for why a Symbols-only name wrecks the sidebar row.
+        icon: 'storage',
+        minRole: 'operator',
+        subtitle:
+          'Where microservice containers run: Fargate, or a pool of EC2 instances. Only EC2 can have GPUs.',
+        status: 'ready',
+        component: () => import('@/pages/ClustersPage.vue'),
+      },
+      {
+        name: 'microservices',
+        path: 'microservices',
+        // Shortest label in the sidebar's 248px column; the page heading below
+        // still says Microservices in full.
+        label: 'Services',
+        title: 'Microservices',
+        // Must exist in the classic Material Icons font, which is the set
+        // quasar.config loads. `deployed_code` is Material *Symbols* only, and
+        // a name the font does not have renders as its literal ligature text —
+        // a run of glyphs that overflows the 32px icon column and wrecks the
+        // row. Every other icon in this file is a classic name; keep it that way.
+        icon: 'dns',
+        // Operator rather than viewer: this page shows which GitHub account the
+        // deployment is attached to and what it was granted, which is
+        // operational rather than onboarding information. Every mutation on it
+        // is admin-gated independently, in the API.
+        minRole: 'operator',
+        subtitle:
+          'Services built from a GitHub repository\'s own Dockerfile, and the one-time App ' +
+          'installation that grants access to it.',
+        status: 'ready',
+        component: () => import('@/pages/MicroservicesPage.vue'),
+      },
       {
         name: 'network',
         path: 'network',

@@ -27,6 +27,13 @@ export const DEPLOYMENT_TAG_KEY = 'msight:deployment';
 export const SENSOR_TAG_KEY = 'msight:sensor';
 
 /**
+ * Tag key recording whether this deployment created a storage bucket or adopted
+ * one that already existed. Kept beside the other tag keys so the vocabulary is
+ * discoverable in one place; the tag set itself is assembled in resource-tags.
+ */
+export const STORAGE_ORIGIN_TAG_KEY = 'msight:storage-origin';
+
+/**
  * Constraints are the intersection of every service a name feeds: IAM role
  * names cap at 64 characters and SQS FIFO queue names at 80 including the
  * `.fifo` suffix, so the deployment name is held well below both to leave room

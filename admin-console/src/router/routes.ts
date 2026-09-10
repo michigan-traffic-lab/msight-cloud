@@ -29,7 +29,22 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/',
     component: () => import('@/layouts/AdminLayout.vue'),
-    children: [{ path: '', redirect: '/overview' }, ...featureRoutes],
+    children: [
+      { path: '', redirect: '/overview' },
+      ...featureRoutes,
+      {
+        // Not a feature, so it is written out here rather than generated: it has
+        // no sidebar entry and is never navigated to from inside the console.
+        // GitHub redirects the browser here after an App install, because a
+        // redirect carries no Cognito token and so cannot land on the admin API.
+        // Its path is registered as the App's Setup URL and is printed by the
+        // stack as GithubAppSetupUrl — changing it breaks every future install.
+        path: 'settings/github/callback',
+        name: 'github-callback',
+        component: () => import('@/pages/GithubCallbackPage.vue'),
+        meta: { title: 'Connecting GitHub', minRole: 'admin' },
+      },
+    ],
   },
   // Unknown paths land on the overview rather than a 404 page: every route in
   // this console is generated from the registry, so an unmatched path is a

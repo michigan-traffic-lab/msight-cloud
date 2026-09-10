@@ -10,7 +10,7 @@ import {
 } from '../../shared/admin-api/http';
 import { authenticate } from '../../shared/admin-api/middleware/auth';
 import { buildVpcRouter } from './routes';
-import { reconcile } from './services/sensor-registry';
+import { reconcileAll } from './services/reconcile';
 import { runMiddleware } from '../../shared/admin-api/router';
 
 const API_VERSION = process.env.API_VERSION ?? 'v1';
@@ -67,7 +67,9 @@ export async function handler(
 ): Promise<APIGatewayProxyStructuredResultV2> {
   if (isScheduledReconcile(event)) {
     try {
-      const result = await reconcile();
+      // Both halves: sensor queues and consumers, and the per-bucket S3 upload
+      // listeners whose lifecycle is a count of the sensors archiving there.
+      const result = await reconcileAll();
       return json(200, result);
     } catch (error) {
       console.error('scheduled reconcile failed', error);

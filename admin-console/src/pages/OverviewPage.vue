@@ -36,6 +36,34 @@ const info = useAsyncValue((signal) => api.systemInfo(signal), { timeoutMs: 1500
 // out without taking the rest of the overview with it.
 const sensors = useAsyncValue((signal) => api.sensors(signal), { timeoutMs: 20000 });
 
+// Apps are the consuming half of the same picture: sensors produce, apps
+// receive. Its own call for the same reason as sensors — a slow Valkey should
+// cost this one card, not the page.
+const apps = useAsyncValue((signal) => api.apps(signal), { timeoutMs: 20000 });
+
+/**
+ * The three subscriptions, counted for the summary card. Mirrors the same list
+ * on the Apps page; kept short here because this card summarises rather than
+ * explains — the Apps page is where each stream is described.
+ */
+const APP_STREAMS = [
+  { key: 'receive_sdsm' as const, label: 'SDSM', color: 'primary' },
+  { key: 'receive_spat' as const, label: 'SPaT', color: 'teal' },
+  { key: 'receive_critical_spat' as const, label: 'Critical SPaT', color: 'deep-orange' },
+];
+
+const appRows = computed(() => apps.data.value?.apps ?? []);
+
+const appStreamCounts = computed(() =>
+  APP_STREAMS.map((stream) => ({
+    ...stream,
+    count: appRows.value.filter((app) => app[stream.key]).length,
+  }))
+);
+
+/** Apps registered but subscribed to nothing — they connect and are told nothing. */
+const silentApps = computed(() => appRows.value.filter((app) => app.receives_nothing));
+
 /** Base URL of the public API, known only once system info has loaded. */
 const publicBase = computed(() => info.data.value?.endpoints.http_api ?? null);
 
@@ -79,6 +107,7 @@ const anyLoading = computed(
     info.state.value === 'loading' ||
     latency.state.value === 'loading' ||
     sensors.state.value === 'loading' ||
+    apps.state.value === 'loading' ||
     healthLoading.value
 );
 
@@ -91,6 +120,7 @@ function reloadAll() {
   void info.reload();
   void latency.reload();
   void sensors.reload();
+  void apps.reload();
   reloadHealth();
 }
 
@@ -290,6 +320,69 @@ async function copy(text: string | null | undefined) {
 
       <div class="col-12 col-md-6">
         <SectionCard
+          title="Apps"
+          lede="Consumer fleets and what each is subscribed to receive. Sensors produce; apps consume."
+        >
+          <AsyncValue :state="apps.state.value" :error="apps.error.value">
+            <div v-if="!appRows.length" class="text-body2 text-grey-7">
+              No apps are registered yet. Add one from the Apps tab.
+            </div>
+            <template v-else>
+              <!-- Leads with the two numbers that answer "is anything actually
+                   being served?" — fleet size and how many apps take each
+                   stream. The per-app chips sit under them. -->
+              <div class="row items-baseline q-gutter-lg q-mb-md">
+                <div>
+                  <div class="text-h6">{{ (apps.data.value?.total_connected ?? 0).toLocaleString() }}</div>
+                  <div class="text-caption text-grey-7">clients connected</div>
+                </div>
+                <div v-for="stream in appStreamCounts" :key="stream.key">
+                  <div class="text-h6" :class="`text-${stream.color}`">{{ stream.count }}</div>
+                  <div class="text-caption text-grey-7">{{ stream.label }}</div>
+                </div>
+              </div>
+
+              <div class="q-gutter-sm">
+                <q-chip
+                  v-for="app in appRows"
+                  :key="app.app_id"
+                  :outline="app.receives_nothing"
+                  :color="app.receives_nothing ? 'grey-5' : 'primary'"
+                  :text-color="app.receives_nothing ? 'grey-8' : 'white'"
+                  :icon="app.receives_nothing ? 'notifications_off' : 'apps'"
+                >
+                  {{ app.display_name || app.app_id }}
+                  <span v-if="app.connected !== null" class="q-ml-xs">
+                    · {{ app.connected.toLocaleString() }}
+                  </span>
+                  <q-tooltip class="hint-tooltip">
+                    {{
+                      app.receives_nothing
+                        ? `${app.app_id} is subscribed to nothing — its clients connect and are sent no messages.`
+                        : `${app.app_id} receives ${APP_STREAMS.filter((s) => app[s.key]).map((s) => s.label).join(', ')}.`
+                    }}
+                  </q-tooltip>
+                </q-chip>
+              </div>
+
+              <div v-if="silentApps.length" class="text-caption text-grey-7 q-mt-md">
+                {{ silentApps.length }}
+                {{ silentApps.length === 1 ? 'app is' : 'apps are' }} subscribed to nothing.
+              </div>
+              <div
+                v-if="apps.data.value?.unregistered_app_ids.length"
+                class="text-caption text-warning q-mt-xs"
+              >
+                {{ apps.data.value.unregistered_app_ids.join(', ') }} —
+                named in <code>clientAppIds</code> but not registered, so receiving nothing.
+              </div>
+            </template>
+          </AsyncValue>
+        </SectionCard>
+      </div>
+
+      <div class="col-12 col-md-6">
+        <SectionCard
           title="Sensors"
           lede="Registered in the console, not in deploy config. Adding one builds its queue, subscription and consumer within a few minutes."
         >
@@ -319,3 +412,14 @@ async function copy(text: string | null | undefined) {
     </div>
   </q-page>
 </template>
+
+<style scoped>
+/* Matches the inline-code treatment on the Apps, Sensors and Storage pages, so
+   a config key referenced here reads the same as it does there. */
+code {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+</style>
