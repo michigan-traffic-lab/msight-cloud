@@ -1,19 +1,26 @@
 import { HttpError } from '../../../shared/admin-api/http';
 import { ensureMicroserviceSchema } from '../../../shared/microservice-schema';
 import type { GithubRepoInfo, InspectBuildResult } from '../../../shared/github/rpc';
-import { getPool } from './db';
+import { getPool, withTransaction } from './db';
 import { inspectBuild, listInstallationRepos } from './github-client';
-import { assertVramFits } from './clusters';
+import {
+  assertVramFits,
+  clusterOccupant,
+  insertCluster,
+  requireCluster,
+  type ClusterRow,
+  type ClusterSettings,
+} from './clusters';
 
 /**
  * The microservice registry: which repository builds each service, and how.
  *
  * One row per microservice. A row records a source (installation, repo, branch,
- * Dockerfile path, build context) and the runtime shape the Fargate service
- * will eventually take. Nothing here provisions anything yet — `provision_state`
- * stays 'not_provisioned' — so what this module actually enforces is that a
- * registered microservice is *buildable*: the branch exists, and there is a
- * Dockerfile where the row says there is.
+ * Dockerfile path, build context), the runtime shape its ECS service takes, and
+ * whether somebody has asked for it to be running. Nothing here touches AWS —
+ * that is `provisioning.ts` — so what this module enforces is that a registered
+ * microservice is *buildable*: the branch exists, and there is a Dockerfile
+ * where the row says there is.
  *
  * That check is the reason a row cannot be saved unvalidated. Storing a source
  * nobody has verified only moves the failure to the first build, by which point
@@ -263,18 +270,97 @@ export interface MicroserviceRow {
    * the console's only way to refuse an overcommit on a shared GPU cluster.
    */
   gpu_vram_mb: number;
+  // ── What provisioning created. Null until it has run. ──────────────────
+  ecr_repository_name: string | null;
+  ecr_repository_uri: string | null;
+  build_project_name: string | null;
+  log_group_name: string | null;
+  /** Null means never expire, which is a choice rather than an oversight. */
+  log_retention_days: number | null;
+  service_arn: string | null;
+  task_definition_arn: string | null;
+  image_tag: string | null;
+  image_digest: string | null;
+  provision_detail: string | null;
+  provisioned_at: string | null;
+  // ── The last image build. ──────────────────────────────────────────────
+  build_id: string | null;
+  build_state: BuildState;
+  build_detail: string | null;
+  /**
+   * The commit the running image was built from. Compared against
+   * `checked_commit_sha` — the branch head as of the last look at GitHub — this
+   * is what distinguishes "deployed" from "up to date".
+   */
+  build_commit_sha: string | null;
+  build_started_at: string | null;
+  build_finished_at: string | null;
+  build_log_group: string | null;
+  build_log_stream: string | null;
+  // ── The standing instruction to get this running. ──────────────────────
+  /**
+   * How far an automatic bring-up has got. 'none' for a service nobody asked
+   * to launch; 'requested' for one whose scaffolding has not started yet,
+   * which is the state the reconcile looks for.
+   */
+  launch_state: LaunchState;
+  launch_detail: string | null;
+  launch_requested_by: string | null;
+  launch_requested_at: string | null;
+  launch_finished_at: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
 }
 
-const COLUMNS = `name, display_name, installation_id, repo_id, repo_full_name, branch,
+/** Mirrors the CodeBuild states the provisioner records. */
+export type BuildState =
+  | 'never'
+  | 'queued'
+  | 'building'
+  | 'succeeded'
+  | 'failed'
+  | 'stopped';
+
+/**
+ * How far an automatic bring-up has got.
+ *
+ * Deliberately a different axis from `provision_state`, which says what exists
+ * on AWS. This says whether anyone is still waiting for the service to come up.
+ * A row can be 'scaffolded' and 'building' at the same time; what separates a
+ * build someone started by hand from one a launch is waiting on is whether the
+ * deploy happens on its own when it finishes.
+ */
+export type LaunchState =
+  | 'none'
+  | 'requested'
+  | 'provisioning'
+  | 'building'
+  | 'deploying'
+  | 'running'
+  | 'failed';
+
+/** The states a launch is still in flight in, and the reconcile picks up. */
+export const LAUNCH_IN_FLIGHT: readonly LaunchState[] = [
+  'requested',
+  'provisioning',
+  'building',
+  'deploying',
+];
+
+export const COLUMNS = `name, display_name, installation_id, repo_id, repo_full_name, branch,
                  dockerfile_path, build_context, check_state, check_detail, checked_at,
                  checked_commit_sha, dockerfile_sha, dockerfile_size, provision_state,
                  desired_count, cpu, memory, container_port, scaling_mode, min_tasks,
                  max_tasks, scaling_metric, scaling_target, scale_out_cooldown,
-                 scale_in_cooldown, cluster_name, gpu_vram_mb, created_by, created_at,
-                 updated_at`;
+                 scale_in_cooldown, cluster_name, gpu_vram_mb, ecr_repository_name,
+                 ecr_repository_uri, build_project_name, log_group_name,
+                 log_retention_days, service_arn, task_definition_arn, image_tag,
+                 image_digest, provision_detail, provisioned_at, build_id, build_state,
+                 build_detail, build_commit_sha, build_started_at, build_finished_at,
+                 build_log_group, build_log_stream, launch_state, launch_detail,
+                 launch_requested_by, launch_requested_at, launch_finished_at,
+                 created_by, created_at, updated_at`;
 
 function optionalIso(value: unknown): string | null {
   return value === null || value === undefined ? null : new Date(value as string).toISOString();
@@ -310,10 +396,39 @@ function toRow(row: Record<string, unknown>): MicroserviceRow {
     scale_in_cooldown: Number(row.scale_in_cooldown),
     cluster_name: row.cluster_name == null ? null : String(row.cluster_name),
     gpu_vram_mb: Number(row.gpu_vram_mb ?? 0),
+    ecr_repository_name: text(row.ecr_repository_name),
+    ecr_repository_uri: text(row.ecr_repository_uri),
+    build_project_name: text(row.build_project_name),
+    log_group_name: text(row.log_group_name),
+    log_retention_days: row.log_retention_days == null ? null : Number(row.log_retention_days),
+    service_arn: text(row.service_arn),
+    task_definition_arn: text(row.task_definition_arn),
+    image_tag: text(row.image_tag),
+    image_digest: text(row.image_digest),
+    provision_detail: text(row.provision_detail),
+    provisioned_at: optionalIso(row.provisioned_at),
+    build_id: text(row.build_id),
+    build_state: (text(row.build_state) ?? 'never') as BuildState,
+    build_detail: text(row.build_detail),
+    build_commit_sha: text(row.build_commit_sha),
+    build_started_at: optionalIso(row.build_started_at),
+    build_finished_at: optionalIso(row.build_finished_at),
+    build_log_group: text(row.build_log_group),
+    build_log_stream: text(row.build_log_stream),
+    launch_state: (text(row.launch_state) ?? 'none') as LaunchState,
+    launch_detail: text(row.launch_detail),
+    launch_requested_by: text(row.launch_requested_by),
+    launch_requested_at: optionalIso(row.launch_requested_at),
+    launch_finished_at: optionalIso(row.launch_finished_at),
     created_by: String(row.created_by),
     created_at: new Date(row.created_at as string).toISOString(),
     updated_at: new Date(row.updated_at as string).toISOString(),
   };
+}
+
+/** Null-preserving string coercion, for the many nullable columns above. */
+function text(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
 }
 
 async function ensureSchema(): Promise<void> {
@@ -327,7 +442,7 @@ export async function listMicroservices(): Promise<MicroserviceRow[]> {
   return rows.map(toRow);
 }
 
-async function requireMicroservice(name: string): Promise<MicroserviceRow> {
+export async function requireMicroservice(name: string): Promise<MicroserviceRow> {
   const pool = await getPool();
   const { rows } = await pool.query(
     `SELECT ${COLUMNS} FROM microservice_clusters WHERE name = $1`,
@@ -534,14 +649,49 @@ export interface CreateMicroserviceInput {
   memory?: number | undefined;
   containerPort?: number | null | undefined;
   scaling?: ScalingInput | undefined;
-  clusterName?: string | null | undefined;
+  /**
+   * The hardware this service runs on.
+   *
+   * A cluster is created for it, always, named after the service. There is no
+   * option to attach to an existing one and no way to create a service without
+   * one, because a cluster carries exactly one service — which makes it a
+   * property of the service, not a thing to choose. Asking an operator to
+   * create one first, or to pick from a list that will only ever have one
+   * relevant entry, is ceremony around a decision they have already made by
+   * filling in this form.
+   *
+   * Defaults to Fargate, which is the right default: nothing to manage and no
+   * cost when idle.
+   *
+   * The cluster and the service are inserted in one transaction, so a service
+   * that fails to save leaves no cluster behind.
+   */
+  compute?: ClusterSettings | undefined;
   gpuVramMb?: number | undefined;
+  /**
+   * Whether to bring the service up as well as register it.
+   *
+   * Recorded here, in the same transaction as the row, rather than being left
+   * to whatever the caller does next. The bring-up itself takes minutes — a
+   * docker build sits in the middle of it — so the intent has to outlive this
+   * request, and the reconcile picks up anything whose follow-up never arrived.
+   * That is what makes "create it and run it" survive a closed tab.
+   *
+   * Off by default. An omitted field must never be the reason instances start
+   * billing; the console sends it explicitly, from a checkbox that says so.
+   */
+  launch?: boolean | undefined;
   actor: string;
 }
 
 export async function createMicroservice(
   input: CreateMicroserviceInput
-): Promise<{ microservice: MicroserviceRow; repo: GithubRepoInfo }> {
+): Promise<{
+  microservice: MicroserviceRow;
+  repo: GithubRepoInfo;
+  /** The dedicated cluster created for it. */
+  cluster: ClusterRow;
+}> {
   await ensureSchema();
 
   const problem = nameProblem(input.name);
@@ -586,67 +736,105 @@ export async function createMicroservice(
   }
 
   const scaling = normalizeScaling(input.scaling);
-  const clusterName = input.clusterName ?? null;
   const gpuVramMb = input.gpuVramMb ?? 0;
 
-  // Before the insert: a service saved onto a cluster whose cards cannot hold
-  // it would look configured and fail on its first GPU allocation.
-  if (clusterName) {
-    await assertVramFits({ clusterName, gpuVramMb });
-  }
+  /**
+   * The cluster takes the service's name.
+   *
+   * Not configurable, because a second name for a thing that maps one-to-one
+   * onto the service is only a way for the two to disagree. It is also the name
+   * an operator will look for in ECS and on the Cost page, so matching the
+   * service is the only helpful choice.
+   */
+  const clusterName = input.name;
 
-  const { rows } = await pool.query(
-    `INSERT INTO microservice_clusters
+  // Fargate unless told otherwise: nothing to manage, no cost when idle.
+  const compute: ClusterSettings = input.compute ?? { capacityType: 'fargate' };
+
+  /**
+   * Both rows, or neither.
+   *
+   * The cluster has to exist before the microservice row can reference it, and
+   * the microservice insert can still fail — on the source uniqueness index,
+   * for instance. Outside a transaction that failure leaves an empty cluster
+   * nobody asked for and the console has no way to describe.
+   */
+  const created = await withTransaction(async (client) => {
+    const cluster = await insertCluster(client, {
+      name: clusterName,
+      displayName: input.displayName ?? null,
+      settings: compute,
+      actor: input.actor,
+    });
+
+    const { rows } = await client.query(
+      `INSERT INTO microservice_clusters
             (name, display_name, installation_id, repo_id, repo_full_name, branch,
              dockerfile_path, build_context, check_state, check_detail, checked_at,
              checked_commit_sha, dockerfile_sha, dockerfile_size, desired_count, cpu,
              memory, container_port, scaling_mode, min_tasks, max_tasks, scaling_metric,
              scaling_target, scale_out_cooldown, scale_in_cooldown, cluster_name,
-             gpu_vram_mb, created_by)
+             gpu_vram_mb, launch_state, launch_requested_by, launch_requested_at,
+             launch_detail, created_by)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11, $12, $13,
                   COALESCE($14, 1), COALESCE($15, 256), COALESCE($16, 512), $17,
-                  $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+                  $18, $19, $20, $21, $22, $23, $24, $25, $26,
+                  CASE WHEN $27::boolean THEN 'requested' ELSE 'none' END,
+                  CASE WHEN $27::boolean THEN $28::text ELSE NULL END,
+                  CASE WHEN $27::boolean THEN NOW() ELSE NULL END,
+                  CASE WHEN $27::boolean
+                       THEN 'Waiting to create its cluster and build its image.'
+                       ELSE NULL END,
+                  $28)
        RETURNING ${COLUMNS}`,
-    [
-      input.name,
-      input.displayName ?? null,
-      input.installationId,
-      repo.repo_id,
-      repo.full_name,
-      branch,
-      dockerfilePath,
-      buildContext,
-      outcome.state,
-      outcome.detail,
-      outcome.commitSha,
-      outcome.dockerfileSha,
-      outcome.dockerfileSize,
-      input.desiredCount ?? null,
-      input.cpu ?? null,
-      input.memory ?? null,
-      input.containerPort ?? null,
-      scaling.scaling_mode,
-      scaling.min_tasks,
-      scaling.max_tasks,
-      scaling.scaling_metric,
-      scaling.scaling_target,
-      scaling.scale_out_cooldown,
-      scaling.scale_in_cooldown,
-      clusterName,
-      gpuVramMb,
-      input.actor,
-    ]
-  );
+      [
+        input.name,
+        input.displayName ?? null,
+        input.installationId,
+        repo.repo_id,
+        repo.full_name,
+        branch,
+        dockerfilePath,
+        buildContext,
+        outcome.state,
+        outcome.detail,
+        outcome.commitSha,
+        outcome.dockerfileSha,
+        outcome.dockerfileSize,
+        input.desiredCount ?? null,
+        input.cpu ?? null,
+        input.memory ?? null,
+        input.containerPort ?? null,
+        scaling.scaling_mode,
+        scaling.min_tasks,
+        scaling.max_tasks,
+        scaling.scaling_metric,
+        scaling.scaling_target,
+        scaling.scale_out_cooldown,
+        scaling.scale_in_cooldown,
+        clusterName,
+        gpuVramMb,
+        Boolean(input.launch),
+        input.actor,
+      ]
+    );
+
+    return { microservice: toRow(rows[0]), cluster };
+  });
 
   console.log('microservice registered', {
     name: input.name,
     repo: repo.full_name,
     branch,
     dockerfile: dockerfilePath,
+    cluster: clusterName,
+    capacity_type: created.cluster.capacity_type,
+    instance_type: created.cluster.instance_type,
+    launch: Boolean(input.launch),
     actor: input.actor,
   });
 
-  return { microservice: toRow(rows[0]), repo };
+  return { microservice: created.microservice, repo, cluster: created.cluster };
 }
 
 export interface UpdateMicroserviceInput {
@@ -750,6 +938,20 @@ export async function updateMicroservice(
     input.clusterName === undefined ? current.cluster_name : (input.clusterName ?? null);
   const gpuVramMb = input.gpuVramMb ?? current.gpu_vram_mb;
 
+  if (clusterName && clusterName !== current.cluster_name) {
+    // Only on a move. Named here so the refusal identifies the service already
+    // there instead of surfacing the unique index as a constraint violation.
+    const occupant = await clusterOccupant(pool, clusterName);
+    if (occupant && occupant !== input.name) {
+      throw new HttpError(
+        409,
+        'cluster_occupied',
+        `Cluster "${clusterName}" already carries "${occupant}". A cluster runs exactly one ` +
+          'service, so this one needs an empty cluster or a new one of its own.'
+      );
+    }
+  }
+
   if (clusterName) {
     // Excluding itself: raising this service's own requirement is measured
     // against its siblings, not against the figure being replaced.
@@ -765,11 +967,11 @@ export async function updateMicroservice(
             dockerfile_path = $7,
             build_context = $8,
             check_state = COALESCE($9, check_state),
-            check_detail = CASE WHEN $9 IS NULL THEN check_detail ELSE $10 END,
-            checked_at = CASE WHEN $9 IS NULL THEN checked_at ELSE NOW() END,
-            checked_commit_sha = CASE WHEN $9 IS NULL THEN checked_commit_sha ELSE $11 END,
-            dockerfile_sha = CASE WHEN $9 IS NULL THEN dockerfile_sha ELSE $12 END,
-            dockerfile_size = CASE WHEN $9 IS NULL THEN dockerfile_size ELSE $13 END,
+            check_detail = CASE WHEN $9::text IS NULL THEN check_detail ELSE $10 END,
+            checked_at = CASE WHEN $9::text IS NULL THEN checked_at ELSE NOW() END,
+            checked_commit_sha = CASE WHEN $9::text IS NULL THEN checked_commit_sha ELSE $11 END,
+            dockerfile_sha = CASE WHEN $9::text IS NULL THEN dockerfile_sha ELSE $12 END,
+            dockerfile_size = CASE WHEN $9::text IS NULL THEN dockerfile_size ELSE $13 END,
             desired_count = COALESCE($14, desired_count),
             cpu = COALESCE($15, cpu),
             memory = COALESCE($16, memory),
@@ -892,9 +1094,11 @@ export async function checkMicroservice(
 /**
  * Removes a microservice from the registry.
  *
- * Nothing is provisioned yet, so this is a row delete and says so. Once this
- * creates real ECS services, removal has to tear those down first — and the
- * response shape already carries the field that will report it.
+ * Refused while anything is provisioned. Deleting the row first would strand
+ * the ECR repository, the build project, the log groups and the ECS service —
+ * every one of them billing, and none of them findable from a console that has
+ * just forgotten they exist. Deprovisioning is a separate, deliberate action
+ * precisely because it destroys things.
  */
 export async function removeMicroservice(input: {
   name: string;
@@ -904,7 +1108,54 @@ export async function removeMicroservice(input: {
   const current = await requireMicroservice(input.name);
   const pool = await getPool();
 
-  await pool.query(`DELETE FROM microservice_clusters WHERE name = $1`, [input.name]);
+  if (current.provision_state !== 'not_provisioned') {
+    throw new HttpError(
+      409,
+      'microservice_provisioned',
+      `"${input.name}" still has AWS resources: ` +
+        [
+          current.ecr_repository_name && 'an image repository',
+          current.build_project_name && 'a build project',
+          current.log_group_name && 'log groups',
+          current.service_arn && 'a running ECS service',
+        ]
+          .filter(Boolean)
+          .join(', ') +
+        '. Deleting the service takes those down first; this route only drops the row, ' +
+        'which would leave them running with nothing tracking them.'
+    );
+  }
+
+  /**
+   * The dedicated cluster goes with it.
+   *
+   * It exists for this service alone, so leaving the row behind would leave an
+   * empty cluster on the Clusters page that nothing explains and nobody will
+   * ever assign a service to. Refused while that cluster still has AWS
+   * resources — deprovisioning the service takes them down, so the ordinary
+   * path arrives here with nothing left to strand.
+   *
+   * One transaction, and the service first: the foreign key is RESTRICT, so the
+   * cluster cannot be deleted while the row referencing it exists.
+   */
+  if (current.cluster_name) {
+    const cluster = await requireCluster(current.cluster_name);
+    if (cluster.provision_state !== 'not_provisioned') {
+      throw new HttpError(
+        409,
+        'cluster_provisioned',
+        `The cluster behind "${input.name}" still has AWS resources. Deleting the service ` +
+          'takes them down first; this route only drops the rows.'
+      );
+    }
+  }
+
+  await withTransaction(async (client) => {
+    await client.query(`DELETE FROM microservice_clusters WHERE name = $1`, [input.name]);
+    if (current.cluster_name) {
+      await client.query(`DELETE FROM compute_clusters WHERE name = $1`, [current.cluster_name]);
+    }
+  });
 
   console.log('microservice removed', {
     name: input.name,

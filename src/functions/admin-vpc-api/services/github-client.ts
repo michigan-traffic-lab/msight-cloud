@@ -2,6 +2,7 @@ import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { HttpError } from '../../../shared/admin-api/http';
 import {
   GITHUB_ERROR_STATUS,
+  type CloneToken,
   type GithubAppIdentity,
   type GithubInstallationInfo,
   type GithubRepoInfo,
@@ -146,6 +147,25 @@ export function inspectBuild(request: {
     branch: request.branch,
     dockerfile_path: request.dockerfilePath,
     build_context: request.buildContext,
+  });
+}
+
+/**
+ * Mints a clone credential for one image build.
+ *
+ * The returned token is live and must go straight into the StartBuild call that
+ * needs it. It is not cached here, not written to the registry, and must never
+ * be logged or included in a route's response body — the console has no use for
+ * it and a browser is the last place it should reach.
+ */
+export function cloneToken(request: {
+  installationId: number;
+  repository: string;
+}): Promise<CloneToken> {
+  return invoke<CloneToken>({
+    op: 'clone_token',
+    installation_id: request.installationId,
+    repository: request.repository,
   });
 }
 

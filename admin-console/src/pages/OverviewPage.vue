@@ -9,12 +9,14 @@ import {
   type LatencyMeasurement,
 } from '@/api/publicApi';
 import { useAsyncValue } from '@/composables/useAsyncValue';
+import { useAuthStore } from '@/stores/auth';
 import AsyncValue from '@/components/AsyncValue.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import StatCard from '@/components/StatCard.vue';
 import SectionCard from '@/components/SectionCard.vue';
 
 const $q = useQuasar();
+const auth = useAuthStore();
 
 /**
  * Endpoints checked directly from this browser.
@@ -53,6 +55,41 @@ const APP_STREAMS = [
 ];
 
 const appRows = computed(() => apps.data.value?.apps ?? []);
+
+/**
+ * Buckets and services, for the headline counts.
+ *
+ * Their own calls, like sensors and apps: a slow S3 listing should cost its own
+ * tile rather than the page. Services are operator-gated, so a viewer is not
+ * asked to fetch something they will be refused — the tile says so instead of
+ * showing an error it cannot act on.
+ */
+const storages = useAsyncValue((signal) => api.storages(signal), { timeoutMs: 20000 });
+
+const canSeeServices = computed(() => auth.hasAtLeast('operator'));
+
+const services = useAsyncValue((signal) => api.microservices(signal), {
+  timeoutMs: 20000,
+  immediate: false,
+});
+
+watch(
+  canSeeServices,
+  (allowed) => {
+    if (allowed) void services.reload();
+  },
+  { immediate: true }
+);
+
+const bucketCount = computed(() => storages.data.value?.storages.length ?? 0);
+const serviceCount = computed(() => services.data.value?.microservices.length ?? 0);
+
+/** Services with AWS resources behind them — the half of the count that costs. */
+const runningServices = computed(
+  () =>
+    services.data.value?.microservices.filter((row) => row.provision_state === 'provisioned')
+      .length ?? 0
+);
 
 const appStreamCounts = computed(() =>
   APP_STREAMS.map((stream) => ({
@@ -108,6 +145,8 @@ const anyLoading = computed(
     latency.state.value === 'loading' ||
     sensors.state.value === 'loading' ||
     apps.state.value === 'loading' ||
+    storages.state.value === 'loading' ||
+    services.state.value === 'loading' ||
     healthLoading.value
 );
 
@@ -121,6 +160,8 @@ function reloadAll() {
   void latency.reload();
   void sensors.reload();
   void apps.reload();
+  void storages.reload();
+  if (canSeeServices.value) void services.reload();
   reloadHealth();
 }
 
@@ -176,18 +217,21 @@ async function copy(text: string | null | undefined) {
       </template>
     </PageHeader>
 
-    <div class="row q-col-gutter-md q-mb-md">
-      <div class="col-6 col-md-3">
-        <StatCard label="Region">
-          <AsyncValue :state="info.state.value" :error="info.error.value">
-            {{ info.data.value?.region }}
-          </AsyncValue>
-        </StatCard>
-      </div>
+    <!--
+      What this deployment is carrying, and where each number is answered.
 
+      Three counts and a build id. The counts lead somewhere because each one is
+      really a question — one sensor, which one? one service, is it running? —
+      and the page that answers it is otherwise a hunt through the sidebar. The
+      region and the round-trip time used to sit here; they are facts about the
+      deployment rather than things it holds, so they moved to the cards below
+      that are already about exactly that.
+    -->
+    <div class="row q-col-gutter-md q-mb-md">
       <div class="col-6 col-md-3">
         <StatCard
           label="Sensors"
+          :to="{ name: 'sensors' }"
           :caption="`of ${sensors.data.value?.sensors.length ?? 0} registered`"
           hint="Sensors currently enabled. They live in an Aurora table, not in deploy config — manage them from the Sensors tab."
         >
@@ -199,15 +243,36 @@ async function copy(text: string | null | undefined) {
 
       <div class="col-6 col-md-3">
         <StatCard
-          label="API latency"
-          caption="round trip from this browser"
-          hint="Measured in the browser against the public latency endpoint, so it includes real network time — not the Lambda's own view of itself."
+          label="Storage"
+          :to="{ name: 'storage' }"
+          :caption="bucketCount === 1 ? 'bucket registered' : 'buckets registered'"
+          hint="S3 buckets registered as sensor upload targets. The stack's own console bucket is never one of them."
         >
-          <AsyncValue :state="latency.state.value" :error="latency.error.value">
-            {{ latency.data.value?.round_trip_ms ?? '—' }}<span class="text-caption text-grey-7">
-              ms</span
-            >
+          <AsyncValue :state="storages.state.value" :error="storages.error.value">
+            {{ bucketCount }}
           </AsyncValue>
+        </StatCard>
+      </div>
+
+      <div class="col-6 col-md-3">
+        <StatCard
+          label="Services"
+          :to="canSeeServices ? { name: 'microservices' } : undefined"
+          :caption="
+            canSeeServices
+              ? `${runningServices} deployed`
+              : 'operator access required'
+          "
+          hint="Microservices built from a GitHub repository and run on ECS. The count is everything registered; the caption is how many are actually running."
+        >
+          <AsyncValue
+            v-if="canSeeServices"
+            :state="services.state.value"
+            :error="services.error.value"
+          >
+            {{ serviceCount }}
+          </AsyncValue>
+          <span v-else class="text-grey-6">—</span>
         </StatCard>
       </div>
 
@@ -224,7 +289,7 @@ async function copy(text: string | null | undefined) {
       <div class="col-12 col-md-6">
         <SectionCard
           title="Component health"
-          lede="Each endpoint is probed independently, so one slow service does not hide the others."
+          lede="Each endpoint is probed independently, so one slow service does not hide the others. Every figure here is measured from this browser, so it includes real network time rather than the Lambda's view of itself."
           flush
         >
           <template #actions>
@@ -243,6 +308,29 @@ async function copy(text: string | null | undefined) {
           </template>
 
           <q-list separator>
+            <!--
+              The latency probe, beside the endpoint probes it belongs with: it
+              is the same measurement taken the same way, and as a headline tile
+              it read as a property of the deployment rather than of the path
+              between this browser and it.
+            -->
+            <q-item>
+              <q-item-section avatar style="min-width: 28px">
+                <q-icon name="speed" size="14px" color="grey-6" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label class="text-body2">API round trip</q-item-label>
+                <q-item-label caption>from this browser</q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <AsyncValue :state="latency.state.value" :error="latency.error.value" inline>
+                  <div class="text-body2 text-weight-medium text-grey-9">
+                    {{ latency.data.value?.round_trip_ms ?? '—' }} ms
+                  </div>
+                </AsyncValue>
+              </q-item-section>
+            </q-item>
+
             <q-item v-for="row in health" :key="row.key">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon name="circle" size="10px" :color="statusColor(row.probe.data.value)" />
@@ -269,8 +357,25 @@ async function copy(text: string | null | undefined) {
       </div>
 
       <div class="col-12 col-md-6">
-        <SectionCard title="Endpoints" lede="Public URLs this deployment exposes." flush>
+        <SectionCard
+          title="Deployment"
+          lede="Where this stack runs, and the public URLs it exposes."
+          flush
+        >
           <q-list separator>
+            <!-- Region moved here from a headline tile: it never changes, and a
+                 constant does not earn a quarter of the fold. -->
+            <q-item>
+              <q-item-section>
+                <q-item-label caption>Region</q-item-label>
+                <q-item-label class="mono">
+                  <AsyncValue :state="info.state.value" :error="info.error.value">
+                    {{ info.data.value?.region ?? '—' }}
+                  </AsyncValue>
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
             <q-item v-for="row in endpointRows" :key="row.label">
               <q-item-section>
                 <q-item-label caption>{{ row.label }}</q-item-label>

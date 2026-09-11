@@ -11,6 +11,7 @@ import {
 import { authenticate } from '../../shared/admin-api/middleware/auth';
 import { buildVpcRouter } from './routes';
 import { reconcileAll } from './services/reconcile';
+import { reconcileLaunches } from './services/provisioning';
 import { runMiddleware } from '../../shared/admin-api/router';
 
 const API_VERSION = process.env.API_VERSION ?? 'v1';
@@ -50,9 +51,10 @@ function buildContext(
 
 /**
  * EventBridge invokes this function on a schedule to converge sensor
- * infrastructure with the registry. That arrives as a bare object rather than
- * an API Gateway event, so it is handled before the router — which would
- * otherwise fail trying to read HTTP fields that are not there.
+ * infrastructure with the registry, and to finish any microservice launch that
+ * is mid-flight. That arrives as a bare object rather than an API Gateway
+ * event, so it is handled before the router — which would otherwise fail
+ * trying to read HTTP fields that are not there.
  */
 function isScheduledReconcile(event: unknown): boolean {
   return (
@@ -66,18 +68,42 @@ export async function handler(
   event: APIGatewayProxyEventV2WithJWTAuthorizer
 ): Promise<APIGatewayProxyStructuredResultV2> {
   if (isScheduledReconcile(event)) {
+    /**
+     * Three things converge here, and each one's failure is isolated.
+     *
+     * They share nothing but the schedule: sensor queues and consumers, the
+     * per-bucket S3 upload listeners whose lifecycle is a count of the sensors
+     * archiving there, and microservice launches waiting on a build. A GitHub
+     * outage that fails a launch must not be the reason sensor ingest stops
+     * converging, so neither half can throw past the other.
+     */
+    const result: Record<string, unknown> = {};
+    let failed = false;
+
     try {
-      // Both halves: sensor queues and consumers, and the per-bucket S3 upload
-      // listeners whose lifecycle is a count of the sensors archiving there.
-      const result = await reconcileAll();
-      return json(200, result);
+      Object.assign(result, await reconcileAll());
     } catch (error) {
+      failed = true;
+      result.sensors_error = error instanceof Error ? error.message : String(error);
       console.error('scheduled reconcile failed', error);
-      return json(500, {
-        error: 'reconcile_failed',
-        message: error instanceof Error ? error.message : 'Unknown failure.',
-      });
     }
+
+    try {
+      /**
+       * The half that makes a launch survive a closed tab.
+       *
+       * The console polls the status endpoint while it is open, which advances
+       * a launch within seconds. This is what advances it when nobody is
+       * looking, and what repairs one whose request died mid-step.
+       */
+      Object.assign(result, await reconcileLaunches());
+    } catch (error) {
+      failed = true;
+      result.launches_error = error instanceof Error ? error.message : String(error);
+      console.error('scheduled launch reconcile failed', error);
+    }
+
+    return json(failed ? 500 : 200, result);
   }
 
   const ctx = buildContext(event);

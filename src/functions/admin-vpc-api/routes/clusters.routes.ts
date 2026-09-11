@@ -8,6 +8,12 @@ import {
   removeCluster,
   updateCluster,
 } from '../services/clusters';
+import { clusterHealthFor, deprovisionCluster, provisionCluster } from '../services/provisioning';
+import {
+  INSTANCE_CATALOG,
+  INSTANCE_MEMORY_OVERHEAD_MIB,
+  taskMemoryCeiling,
+} from '../../../shared/instance-catalog';
 
 /**
  * Capacity settings, as one object.
@@ -69,6 +75,66 @@ export function clusterRoutes(base: string): Router {
   const operator = { middleware: [requireRole('operator')] };
 
   router.get(`${base}/clusters`, async () => ok(await listClusters()), operator);
+
+  /**
+   * The instance catalog, served rather than duplicated in the console.
+   *
+   * The console needs vCPU, memory, GPU count and VRAM to auto-fill its form
+   * and to warn about a task that cannot place. Shipping a second copy of those
+   * numbers in the frontend would mean the check the API enforces and the hint
+   * the form shows could disagree — and the number in question is the one that
+   * decides whether a GPU overcommit is refused.
+   *
+   * Registered before `:name` so the literal segment wins.
+   */
+  router.get(
+    `${base}/clusters/instance-types`,
+    async () =>
+      ok({
+        instance_types: INSTANCE_CATALOG.map((spec) => ({
+          ...spec,
+          task_memory_ceiling: taskMemoryCeiling(spec),
+        })),
+        memory_overhead_mib: INSTANCE_MEMORY_OVERHEAD_MIB,
+      }),
+    operator
+  );
+
+  /**
+   * Live health: what ECS actually has, beside what the row asked for.
+   *
+   * Operator-level, like every other read on this page. The figure worth the
+   * round trip is `gpu_visible` — a provisioned GPU cluster that registered
+   * zero GPUs looks healthy by every other measure and will never place a GPU
+   * task, and nothing else in either console surfaces that.
+   */
+  router.get(
+    `${base}/clusters/:name/health`,
+    async (ctx) => ok(await clusterHealthFor(ctx.params.name)),
+    operator
+  );
+
+  /**
+   * Creating and destroying the AWS resources behind a cluster.
+   *
+   * Admin-only, and separate from saving the row. Provisioning an EC2 cluster
+   * starts instances that bill by the second; deprovisioning terminates them
+   * and takes the capacity out from under anything still running. Neither
+   * should be a side effect of editing a form, which is why an edit marks the
+   * cluster 'drifted' and leaves the decision here.
+   */
+  router.post(
+    `${base}/clusters/:name/provision`,
+    async (ctx) => ok(await provisionCluster({ name: ctx.params.name, actor: ctx.caller.username })),
+    admin
+  );
+
+  router.post(
+    `${base}/clusters/:name/deprovision`,
+    async (ctx) =>
+      ok(await deprovisionCluster({ name: ctx.params.name, actor: ctx.caller.username })),
+    admin
+  );
 
   router.post(
     `${base}/clusters`,

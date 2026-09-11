@@ -1562,6 +1562,11 @@ export class MsightCloudStack extends cdk.Stack {
         CONTROL_TOPIC_ARN: controlTopic.topicArn,
         DEPLOYMENT_NAME: deployment,
         SENSOR_RESOURCE_PREFIX: name.sensorResourcePrefix,
+        // Which log groups belong to this deployment. Deployment-scoped, so it
+        // cannot be a literal: the Logs page filtered on a hardcoded `/msight/`
+        // and therefore matched none of this stack's own `/msight-cloud/...`
+        // groups.
+        LOG_PREFIX: name.logPrefix,
         // Identifies this stack's spend in Cost Explorer.
         COST_TAG_KEY: costAllocationTagKey,
         COST_TAG_VALUE: stackTags[costAllocationTagKey],
@@ -1674,6 +1679,193 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     // -------------------------
+    // Microservice roles
+    //
+    // Four CDK-owned roles, passed by name to resources the console creates at
+    // runtime. Owned here rather than created per microservice for one reason
+    // that outweighs the convenience of the alternative: a console that could
+    // create IAM roles would be a console that can escalate its own privileges.
+    // These four are fixed, reviewable in this file, and the admin API's
+    // `iam:PassRole` is conditioned to exactly them.
+    // -------------------------
+
+    /**
+     * What a running microservice container may do.
+     *
+     * Mirrors `SensorConsumerTaskRole` deliberately: a microservice is an
+     * algorithm over the same deployment, so it needs the same things — the
+     * database behind the proxy, the cache, the sensor queues it consumes, the
+     * topics it publishes results to. A narrower role would mean every
+     * microservice's first act is to ask an admin for permissions.
+     */
+    const microserviceTaskRole = new iam.Role(this, 'MicroserviceTaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      roleName: name.microserviceTaskRole,
+      description:
+        'Runtime permissions for microservice containers created through the MSight console.',
+    });
+
+    cluster.secret!.grantRead(microserviceTaskRole);
+
+    // The sensor queues, by the same name pattern the reconciler creates them
+    // under — a microservice consuming sensor data reads the same queues the
+    // sensor consumers do.
+    microserviceTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'sqs:ReceiveMessage',
+          'sqs:DeleteMessage',
+          'sqs:DeleteMessageBatch',
+          'sqs:GetQueueAttributes',
+          'sqs:GetQueueUrl',
+        ],
+        resources: [sensorQueueGrantScope],
+      })
+    );
+
+    // Publishing results. Scoped to this deployment's three topics — a
+    // microservice has no business publishing anywhere else in the account.
+    microserviceTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['sns:Publish'],
+        resources: [sensorTopic.topicArn, spatTopic.topicArn, controlTopic.topicArn],
+      })
+    );
+
+    // Pushing to connected WebSocket clients, as the sensor consumers do.
+    microserviceTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['execute-api:ManageConnections'],
+        resources: [wsManageConnectionsArn],
+      })
+    );
+
+    /**
+     * Object access to the storage buckets.
+     *
+     * Unscoped by bucket, unavoidably, and for exactly the reason the admin
+     * function's storage grant already documents: bucket names are chosen by an
+     * operator, and an adopted bucket follows no convention this stack
+     * controls, so there is no ARN pattern that would not break the feature.
+     *
+     * The narrowing that IS possible is by action, and it is strict. Object read
+     * and write only: no `s3:DeleteObject`, so a microservice cannot destroy
+     * archived sensor data, and no bucket-level configuration rights at all.
+     */
+    microserviceTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:GetObject', 's3:PutObject', 's3:ListBucket', 's3:GetBucketLocation'],
+        resources: [`arn:${cdk.Aws.PARTITION}:s3:::*`],
+      })
+    );
+
+    // ECS Exec. Without these four the `enableExecuteCommand` on every service
+    // is inert and "get a shell in the container" silently does not work.
+    microserviceTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'ssmmessages:CreateControlChannel',
+          'ssmmessages:CreateDataChannel',
+          'ssmmessages:OpenControlChannel',
+          'ssmmessages:OpenDataChannel',
+        ],
+        resources: ['*'],
+      })
+    );
+
+    /**
+     * What ECS itself needs to start the task: pull the image, open the log
+     * stream. Distinct from the task role because it is used *before* the
+     * container exists, and it deliberately holds nothing the container can
+     * reach once it does.
+     */
+    const microserviceExecutionRole = new iam.Role(this, 'MicroserviceExecutionRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      roleName: name.microserviceExecutionRole,
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName(
+          'service-role/AmazonECSTaskExecutionRolePolicy'
+        ),
+      ],
+      description: 'Image pull and log stream creation for MSight microservice tasks.',
+    });
+
+    /**
+     * The CodeBuild role that turns a Dockerfile into an image.
+     *
+     * Push rights are scoped to this deployment's own repository namespace, so
+     * a build cannot overwrite an image belonging to another deployment — or to
+     * anything else in the account.
+     */
+    const microserviceBuildRole = new iam.Role(this, 'MicroserviceBuildRole', {
+      assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+      roleName: name.microserviceBuildRole,
+      description: 'Builds and pushes MSight microservice images.',
+    });
+
+    microserviceBuildRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [
+          `arn:${cdk.Aws.PARTITION}:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:log-group:/${name.logPrefix}/microservice-build/*`,
+          `arn:${cdk.Aws.PARTITION}:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:log-group:/${name.logPrefix}/microservice-build/*:*`,
+        ],
+      })
+    );
+
+    microserviceBuildRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'ecr:BatchCheckLayerAvailability',
+          'ecr:CompleteLayerUpload',
+          'ecr:InitiateLayerUpload',
+          'ecr:PutImage',
+          'ecr:UploadLayerPart',
+          'ecr:BatchGetImage',
+          'ecr:GetDownloadUrlForLayer',
+        ],
+        resources: [
+          `arn:${cdk.Aws.PARTITION}:ecr:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:repository/${name.microserviceResourcePrefix}/*`,
+        ],
+      })
+    );
+
+    microserviceBuildRole.addToPolicy(
+      new iam.PolicyStatement({
+        // GetAuthorizationToken takes no resource — it mints the docker login
+        // credential and is scoped by the push rights above, not by itself.
+        actions: ['ecr:GetAuthorizationToken'],
+        resources: ['*'],
+      })
+    );
+
+    /**
+     * The role EC2 container instances assume.
+     *
+     * `AmazonEC2ContainerServiceforEC2Role` is what lets the ECS agent register
+     * the instance with a cluster and report its resources. Session Manager is
+     * added so an operator can reach a misbehaving GPU host without this stack
+     * opening SSH or assigning a public address to anything.
+     */
+    const microserviceInstanceRole = new iam.Role(this, 'MicroserviceInstanceRole', {
+      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
+      roleName: name.microserviceInstanceRole,
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName(
+          'service-role/AmazonEC2ContainerServiceforEC2Role'
+        ),
+        iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'),
+      ],
+      description: 'ECS agent and Session Manager access for MSight microservice instances.',
+    });
+
+    const microserviceInstanceProfile = new iam.CfnInstanceProfile(
+      this,
+      'MicroserviceInstanceProfile',
+      { roles: [microserviceInstanceRole.roleName] }
+    );
+
+    // -------------------------
     // GitHub App credentials
     //
     // The App ID, its PEM private key, and the webhook secret. Written by the
@@ -1780,6 +1972,18 @@ export class MsightCloudStack extends cdk.Stack {
         // Apps page states that delay rather than leaving it to be discovered.
         CONFIG_CACHE_TTL_SECONDS: configCacheTtlSeconds,
         DEPLOYMENT_NAME: deployment,
+        /**
+         * The prefix the microservice log groups are named with.
+         *
+         * Passed explicitly because it is not derivable from the deployment
+         * name: a deployment called `msight-cloud` may log under `/msight/`,
+         * and this stack does. Without it this function fell back to the
+         * deployment name, tried to create `/msight-cloud/microservice/x`,
+         * and was denied by its own IAM policy — which is scoped to the
+         * `logPrefix` form a few hundred lines below. The two have to agree,
+         * so they read the same value.
+         */
+        LOG_PREFIX: name.logPrefix,
         SENSOR_RESOURCE_PREFIX: name.sensorResourcePrefix,
         SENSOR_TOPIC_ARN: sensorTopic.topicArn,
         SENSOR_CLUSTER_NAME: ecsCluster.clusterName,
@@ -1809,6 +2013,45 @@ export class MsightCloudStack extends cdk.Stack {
         // and GithubWebhookUrl outputs print, and must stay in step with them.
         CONSOLE_URL: consoleUrl,
         GITHUB_WEBHOOK_URL: `${httpApi.apiEndpoint}/v1/github/webhook`,
+        // Microservice provisioning. The account id is passed explicitly
+        // because a Lambda's environment does not carry it and the ECR
+        // repository URI cannot be built without it.
+        AWS_ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
+        MICROSERVICE_RESOURCE_PREFIX: name.microserviceResourcePrefix,
+        MICROSERVICE_TASK_ROLE_ARN: microserviceTaskRole.roleArn,
+        MICROSERVICE_EXECUTION_ROLE_ARN: microserviceExecutionRole.roleArn,
+        MICROSERVICE_BUILD_ROLE_ARN: microserviceBuildRole.roleArn,
+        MICROSERVICE_INSTANCE_PROFILE_ARN: microserviceInstanceProfile.attrArn,
+        // Tasks and container instances land in the same subnets and security
+        // group as everything else, which is what gives them a route to the
+        // RDS proxy, Valkey, and — through the NAT gateway — ECR and the
+        // internet.
+        MICROSERVICE_SUBNET_IDS: vpc.selectSubnets(appSubnetSelection).subnetIds.join(','),
+        MICROSERVICE_SECURITY_GROUP_IDS: lambdaSg.securityGroupId,
+        /**
+         * The environment every microservice container receives.
+         *
+         * One JSON blob rather than a dozen variables, because the set grows: a
+         * microservice sees the same deployment the sensor consumers do, and
+         * adding an endpoint should not mean editing the stack, the config
+         * loader and the task definition builder.
+         */
+        MICROSERVICE_TASK_ENV: JSON.stringify({
+          BUILD_ID: buildId,
+          AWS_REGION: cdk.Stack.of(this).region,
+          DB_HOST: proxy.endpoint,
+          DB_PORT: '5432',
+          DB_NAME: 'msight',
+          DB_SECRET_ARN: cluster.secret!.secretArn,
+          CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
+          CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
+          CACHE_TLS_ENABLED: 'true',
+          SENSOR_TOPIC_ARN: sensorTopic.topicArn,
+          SPAT_TOPIC_ARN: spatTopic.topicArn,
+          CONTROL_TOPIC_ARN: controlTopic.topicArn,
+          SENSOR_RESOURCE_PREFIX: name.sensorResourcePrefix,
+          WS_API_ENDPOINT: wsApiUrl,
+        }),
       },
     });
 
@@ -1956,6 +2199,325 @@ export class MsightCloudStack extends cdk.Stack {
         // to type bucket names from memory.
         actions: ['s3:ListAllMyBuckets'],
         resources: ['*'],
+      })
+    );
+
+    /**
+     * Microservice provisioning.
+     *
+     * This is the broadest grant in the stack, and every statement below is
+     * narrowed as far as the API in question allows. The pattern is the same
+     * throughout: scope by this deployment's own name prefix, so a console
+     * holding create-and-delete rights over real infrastructure cannot reach a
+     * neighbouring deployment's — or anything else in the account.
+     *
+     * Where a statement is unscoped it is because the AWS API defines no
+     * resource type for it, and that is called out on each one. Guessing a
+     * pattern that IAM ignores would read as a restriction while enforcing
+     * nothing, which is worse than the honest `*`.
+     */
+    const msPrefix = name.microserviceResourcePrefix;
+    const arn = (service: string, resource: string) =>
+      `arn:${cdk.Aws.PARTITION}:${service}:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:${resource}`;
+
+    // ECR: one repository per microservice, under this deployment's namespace.
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'ecr:CreateRepository',
+          'ecr:DeleteRepository',
+          'ecr:DescribeRepositories',
+          'ecr:DescribeImages',
+          'ecr:PutLifecyclePolicy',
+          'ecr:TagResource',
+          // Deleting a repository with images requires being able to see and
+          // remove them; `force: true` is refused without it.
+          'ecr:BatchDeleteImage',
+          'ecr:ListImages',
+        ],
+        resources: [arn('ecr', `repository/${msPrefix}/*`)],
+      })
+    );
+
+    // CodeBuild: one project per microservice.
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'codebuild:CreateProject',
+          'codebuild:UpdateProject',
+          'codebuild:DeleteProject',
+          'codebuild:BatchGetProjects',
+          'codebuild:StartBuild',
+          'codebuild:StopBuild',
+        ],
+        resources: [arn('codebuild', `project/${msPrefix}-build-*`)],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        // BatchGetBuilds takes build ids, not project ARNs, and IAM defines no
+        // resource type for a build — so this cannot be narrowed. Reaching a
+        // build id still requires having started it through the project rights
+        // above.
+        actions: ['codebuild:BatchGetBuilds'],
+        resources: ['*'],
+      })
+    );
+
+    /**
+     * ECS, in two statements for the reason the sensor grants above already
+     * document: the cluster-conditioned actions carry an `ecs:cluster` key and
+     * the rest do not, and mixing them makes `ArnEquals` fail closed for both.
+     *
+     * The cluster ARN is a wildcard over this deployment's prefix because,
+     * unlike the sensors, each microservice gets its own cluster and their
+     * names are not known at synth time.
+     */
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'ecs:CreateCluster',
+          'ecs:DeleteCluster',
+          'ecs:DescribeClusters',
+          'ecs:PutClusterCapacityProviders',
+          'ecs:CreateCapacityProvider',
+          'ecs:DeleteCapacityProvider',
+          'ecs:DescribeCapacityProviders',
+        ],
+        resources: [arn('ecs', `cluster/${msPrefix}-cluster-*`), arn('ecs', 'capacity-provider/*')],
+      })
+    );
+    /**
+     * Everything that acts on something *inside* a cluster.
+     *
+     * Conditioned rather than resource-scoped because the resources are created
+     * at runtime and their ARNs are not known at synth time. `ecs:cluster` is
+     * the right key for these: a service, a task and a container instance each
+     * belong to a cluster, so ECS puts that cluster in the request context and
+     * the condition can be evaluated.
+     *
+     * `ecs:ListContainerInstances` is deliberately not in this list — see the
+     * statement below for why it cannot be.
+     */
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'ecs:CreateService',
+          'ecs:DeleteService',
+          'ecs:UpdateService',
+          'ecs:DescribeServices',
+          'ecs:DescribeContainerInstances',
+          'ecs:ListTasks',
+          'ecs:DescribeTasks',
+        ],
+        resources: ['*'],
+        conditions: {
+          ArnLike: { 'ecs:cluster': arn('ecs', `cluster/${msPrefix}-cluster-*`) },
+        },
+      })
+    );
+
+    /**
+     * Listing a cluster's container instances, scoped by ARN and not by
+     * condition — and the difference is not stylistic.
+     *
+     * `ecs:cluster` is populated only for resources that live *inside* a
+     * cluster. For this action the cluster IS the resource, so the key is
+     * absent from the request, every `ArnLike` on it evaluates false, and the
+     * call is refused by a statement that names the action and whose pattern
+     * matches the ARN. It reads as correct and cannot ever allow anything.
+     *
+     * That is precisely how it failed: the console's capacity view returned a
+     * bare 500, and the function's log said "not authorized to perform
+     * ecs:ListContainerInstances on cluster/…-testing because no identity-based
+     * policy allows the action" — while the deployed policy did allow it.
+     *
+     * `ecs:ListServices` was in the conditioned statement for the same reason
+     * and has been dropped rather than moved: nothing calls it, and it could
+     * never have worked there either.
+     */
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:ListContainerInstances'],
+        resources: [arn('ecs', `cluster/${msPrefix}-cluster-*`)],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        // Tagging on create needs TagResource on the resource being created,
+        // and TagResource carries no cluster parameter — so it is scoped by ARN
+        // rather than by condition, exactly as the sensor grant is.
+        actions: ['ecs:TagResource'],
+        resources: [
+          arn('ecs', `cluster/${msPrefix}-cluster-*`),
+          arn('ecs', `service/${msPrefix}-cluster-*/${msPrefix}-*`),
+          arn('ecs', `task-definition/${msPrefix}-*`),
+          arn('ecs', 'capacity-provider/*'),
+        ],
+      })
+    );
+
+    // EC2 launch templates for the container instances.
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'ec2:CreateLaunchTemplate',
+          'ec2:CreateLaunchTemplateVersion',
+          'ec2:DeleteLaunchTemplate',
+          'ec2:DescribeLaunchTemplates',
+          'ec2:DescribeLaunchTemplateVersions',
+          // Tagging on create.
+          'ec2:CreateTags',
+        ],
+        resources: ['*'],
+      })
+    );
+
+    /**
+     * Auto Scaling. Unscoped, because `CreateAutoScalingGroup` names a group
+     * that does not exist yet and IAM evaluates the request against the ARN it
+     * would have — a pattern here does restrict the others, but the create call
+     * is what matters and it is the one that cannot be narrowed further than
+     * the group name it is given.
+     */
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'autoscaling:CreateAutoScalingGroup',
+          'autoscaling:UpdateAutoScalingGroup',
+          'autoscaling:DeleteAutoScalingGroup',
+          'autoscaling:DescribeAutoScalingGroups',
+          'autoscaling:CreateOrUpdateTags',
+          'autoscaling:DeleteTags',
+        ],
+        resources: ['*'],
+      })
+    );
+
+    /**
+     * Application Auto Scaling, for the per-service target-tracking policy.
+     *
+     * `iam:CreateServiceLinkedRole` is what makes the first ever registration
+     * work: Application Auto Scaling needs its own service-linked role and
+     * creates it on demand. Conditioned to that one service so it cannot be
+     * used to mint a role for anything else.
+     */
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'application-autoscaling:RegisterScalableTarget',
+          'application-autoscaling:DeregisterScalableTarget',
+          'application-autoscaling:DescribeScalableTargets',
+          'application-autoscaling:PutScalingPolicy',
+          'application-autoscaling:DeleteScalingPolicy',
+          'application-autoscaling:DescribeScalingPolicies',
+          'application-autoscaling:TagResource',
+          // Target tracking creates the CloudWatch alarms that drive it.
+          'cloudwatch:PutMetricAlarm',
+          'cloudwatch:DeleteAlarms',
+          'cloudwatch:DescribeAlarms',
+        ],
+        resources: ['*'],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['iam:CreateServiceLinkedRole'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            'iam:AWSServiceName': [
+              'ecs.application-autoscaling.amazonaws.com',
+              'autoscaling.amazonaws.com',
+              'ecs.amazonaws.com',
+            ],
+          },
+        },
+      })
+    );
+
+    // The ECS-optimized AMI parameters. Public, AWS-owned, read-only.
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+        resources: [
+          `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}::parameter/aws/service/ecs/optimized-ami/*`,
+        ],
+      })
+    );
+
+    /**
+     * Log group lifecycle for microservices: create, retain, empty, delete.
+     *
+     * Scoped to this deployment's two microservice log group prefixes, so the
+     * console cannot delete the log group of a Lambda, a sensor, or an API — the
+     * "rotate logs" feature is exactly the kind of thing that should not be able
+     * to reach the audit trail of everything else.
+     */
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'logs:CreateLogGroup',
+          'logs:DeleteLogGroup',
+          'logs:PutRetentionPolicy',
+          'logs:DeleteRetentionPolicy',
+          'logs:TagResource',
+          'logs:DescribeLogStreams',
+          'logs:DeleteLogStream',
+          // Reading, not only managing. The console tails a service's container
+          // and build logs in place rather than sending the operator to the
+          // Logs page mid-diagnosis, and a build that failed is unreadable
+          // without this — its reason is the last few lines it wrote.
+          'logs:GetLogEvents',
+        ],
+        resources: [
+          arn('logs', `log-group:/${name.logPrefix}/microservice/*`),
+          arn('logs', `log-group:/${name.logPrefix}/microservice/*:*`),
+          arn('logs', `log-group:/${name.logPrefix}/microservice-build/*`),
+          arn('logs', `log-group:/${name.logPrefix}/microservice-build/*:*`),
+        ],
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        // DescribeLogGroups cannot be scoped to a resource. Read-only.
+        actions: ['logs:DescribeLogGroups'],
+        resources: ['*'],
+      })
+    );
+
+    /**
+     * PassRole, conditioned to the four microservice roles and to the service
+     * each may be handed to.
+     *
+     * This is the statement that matters most. `iam:PassRole` is the classic
+     * privilege-escalation primitive: unconditioned, it would let the console
+     * attach any role in the account — including its own, or an
+     * administrator's — to a container it then runs code in. Conditioning both
+     * the role and the receiving service is what makes create-a-task-definition
+     * a bounded capability rather than a way out of its own permissions.
+     */
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['iam:PassRole'],
+        resources: [microserviceTaskRole.roleArn, microserviceExecutionRole.roleArn],
+        conditions: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } },
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['iam:PassRole'],
+        resources: [microserviceBuildRole.roleArn],
+        conditions: { StringEquals: { 'iam:PassedToService': 'codebuild.amazonaws.com' } },
+      })
+    );
+    adminVpcApiLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        // The instance role reaches EC2 through the instance profile named in
+        // the launch template, so the passing service is ec2, not ecs-tasks.
+        actions: ['iam:PassRole'],
+        resources: [microserviceInstanceRole.roleArn],
+        conditions: { StringEquals: { 'iam:PassedToService': 'ec2.amazonaws.com' } },
       })
     );
 
@@ -2139,6 +2701,12 @@ export class MsightCloudStack extends cdk.Stack {
     // replaces the sensor queues runs the reconcile before they are gone; and SQS
     // refuses to recreate a queue within 60 seconds of its deletion. Both resolve
     // on the next tick, so the tick interval is the worst-case ingest gap.
+    //
+    // It carries microservice launches too, despite the name. A launch spans an
+    // image build that no request can wait out, so the deploy at the far end
+    // happens whenever something next looks — the console while it is open, and
+    // this when it is not. Five minutes is therefore also the worst case for
+    // "created a service, closed the tab, how long until it is running".
     new events.Rule(this, 'SensorReconcileSchedule', {
       schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
       targets: [

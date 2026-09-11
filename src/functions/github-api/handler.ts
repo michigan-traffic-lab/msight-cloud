@@ -1,5 +1,6 @@
 import { GithubAuthError, newRequestId } from './app-auth';
 import {
+  cloneToken,
   convertManifest,
   deleteInstallation,
   getInstallation,
@@ -99,6 +100,12 @@ async function run(request: GithubRpcRequest): Promise<GithubRpcData> {
         dockerfile_path: requireString(request.dockerfile_path, 'dockerfile_path'),
         // '.' is meaningful (the repo root) so an empty context is not an error.
         build_context: typeof request.build_context === 'string' ? request.build_context : '.',
+      });
+
+    case 'clone_token':
+      return cloneToken({
+        installationId: installationIdOf(request),
+        repository: requireString(request.repository, 'repository'),
       });
 
     case 'delete_installation':

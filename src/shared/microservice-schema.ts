@@ -298,6 +298,157 @@ export async function ensureMicroserviceSchema(db: Queryable): Promise<void> {
       ON microservice_clusters (repo_id, branch, dockerfile_path)
   `);
 
+  /**
+   * One cluster carries one service.
+   *
+   * The rule is not an ECS limit — a cluster happily runs dozens — it is what
+   * makes the rest of this feature answerable. Cost: an instance's hours cannot
+   * be split between the services sharing it, so per-service spend is only
+   * honest when the cluster is the service. Capacity: scaling a service means
+   * scaling its instances, which is incoherent when a neighbour's tasks are
+   * also on them. GPU: `NVIDIA_VISIBLE_DEVICES` exposes the whole card to every
+   * task on the box, so "which service ran the GPU out of memory" has no answer
+   * on a shared cluster. Logs: one log group per cluster can be retained and
+   * dropped as a unit.
+   *
+   * A partial index rather than a UNIQUE column so any number of rows may sit
+   * unassigned — `cluster_name IS NULL` is the ordinary state of a service that
+   * has been registered but not yet given somewhere to run.
+   */
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS microservice_clusters_one_per_cluster_idx
+      ON microservice_clusters (cluster_name)
+      WHERE cluster_name IS NOT NULL
+  `);
+
+  /**
+   * What provisioning created, per service.
+   *
+   * Recorded rather than derived, because every one of these is the answer to
+   * "what do I delete". A teardown that rediscovers its own resources by
+   * guessing at names is a teardown that either misses something and bills
+   * forever, or matches too widely and deletes a neighbour's. The names are
+   * deterministic, but writing them down at creation is what makes removal
+   * provably exact.
+   *
+   * `image_digest` and not just the tag: a tag is a moving pointer, and the
+   * whole question after a rebuild is whether the running task is on the image
+   * that was just built. Comparing digests answers it; comparing tags cannot.
+   */
+  await db.query(`
+    ALTER TABLE microservice_clusters
+      ADD COLUMN IF NOT EXISTS ecr_repository_name TEXT NULL,
+      ADD COLUMN IF NOT EXISTS ecr_repository_uri  TEXT NULL,
+      ADD COLUMN IF NOT EXISTS build_project_name  TEXT NULL,
+      ADD COLUMN IF NOT EXISTS log_group_name      TEXT NULL,
+      -- CloudWatch retention in days. Null means never expire, which is a
+      -- choice an operator may make and a default nobody should get by
+      -- accident: an unbounded log group is a bill that only grows.
+      ADD COLUMN IF NOT EXISTS log_retention_days  INTEGER NULL DEFAULT 30,
+      ADD COLUMN IF NOT EXISTS service_arn         TEXT NULL,
+      ADD COLUMN IF NOT EXISTS task_definition_arn TEXT NULL,
+      ADD COLUMN IF NOT EXISTS image_tag           TEXT NULL,
+      ADD COLUMN IF NOT EXISTS image_digest        TEXT NULL,
+      -- Why the last provision attempt ended as it did. Held so a failure is
+      -- still readable after the request that produced it is long gone.
+      ADD COLUMN IF NOT EXISTS provision_detail    TEXT NULL,
+      ADD COLUMN IF NOT EXISTS provisioned_at      TIMESTAMPTZ NULL
+  `);
+
+  /**
+   * The last image build.
+   *
+   * One row's worth, not a history table. What an operator needs is "is it
+   * building, did it work, and what came out"; a full build history is
+   * CodeBuild's own console, which this deliberately does not reimplement.
+   *
+   * `build_commit_sha` is the point of the whole group: it is how the console
+   * shows that the branch has moved on since the running image was built, which
+   * is the difference between "deployed" and "up to date".
+   */
+  await db.query(`
+    ALTER TABLE microservice_clusters
+      ADD COLUMN IF NOT EXISTS build_id           TEXT NULL,
+      -- 'never' | 'queued' | 'building' | 'succeeded' | 'failed' | 'stopped'
+      ADD COLUMN IF NOT EXISTS build_state        TEXT NOT NULL DEFAULT 'never',
+      ADD COLUMN IF NOT EXISTS build_detail       TEXT NULL,
+      ADD COLUMN IF NOT EXISTS build_commit_sha   TEXT NULL,
+      ADD COLUMN IF NOT EXISTS build_started_at   TIMESTAMPTZ NULL,
+      ADD COLUMN IF NOT EXISTS build_finished_at  TIMESTAMPTZ NULL,
+      ADD COLUMN IF NOT EXISTS build_log_group    TEXT NULL,
+      ADD COLUMN IF NOT EXISTS build_log_stream   TEXT NULL
+  `);
+
+  /**
+   * A standing instruction to get this service running.
+   *
+   * The lifecycle underneath is still four steps — scaffold, build, wait,
+   * deploy — because each one costs something different and each one fails
+   * differently. What this records is that somebody has already decided to take
+   * all four: creating a service asks the questions once and then says "and
+   * run it", instead of leaving three buttons to be found on two pages.
+   *
+   * It is a column rather than a variable in whichever request started it,
+   * because the middle step is a docker build that runs for minutes. Nothing
+   * can hold a Lambda open that long, so the intent has to survive the request
+   * — and then survive the operator closing the tab. Both the status endpoint
+   * the console polls and the five-minute reconcile advance it, so a launch
+   * finishes whether or not anyone is watching.
+   *
+   * 'requested' is the state a row is created in and the one the reconcile
+   * looks for: it means the scaffolding has not started yet, so a create whose
+   * follow-up call never arrived is picked up rather than stranded.
+   */
+  await db.query(`
+    ALTER TABLE microservice_clusters
+      -- 'none' | 'requested' | 'provisioning' | 'building' | 'deploying'
+      -- | 'running' | 'failed'
+      ADD COLUMN IF NOT EXISTS launch_state        TEXT NOT NULL DEFAULT 'none',
+      -- Why a launch stopped where it did, kept so a failure is still readable
+      -- long after the request that produced it.
+      ADD COLUMN IF NOT EXISTS launch_detail       TEXT NULL,
+      ADD COLUMN IF NOT EXISTS launch_requested_by TEXT NULL,
+      ADD COLUMN IF NOT EXISTS launch_requested_at TIMESTAMPTZ NULL,
+      ADD COLUMN IF NOT EXISTS launch_finished_at  TIMESTAMPTZ NULL
+  `);
+
+  /**
+   * Serves the reconcile, which asks only for the few rows mid-launch.
+   *
+   * Partial, because the answer is almost always empty: a launch takes minutes
+   * and then the row leaves these states for good. A full index would be read
+   * every five minutes to find nothing.
+   */
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS microservice_clusters_launch_idx
+      ON microservice_clusters (launch_state)
+      WHERE launch_state IN ('requested', 'provisioning', 'building', 'deploying')
+  `);
+
+  /**
+   * What provisioning created, per cluster.
+   *
+   * Fargate uses none of the EC2 columns: there is no launch template, no
+   * scaling group and no capacity provider, because there are no instances. A
+   * Fargate row leaves them null, which is also how a reconcile tells the two
+   * apart without re-reading `capacity_type`.
+   */
+  await db.query(`
+    ALTER TABLE compute_clusters
+      ADD COLUMN IF NOT EXISTS cluster_arn            TEXT NULL,
+      ADD COLUMN IF NOT EXISTS launch_template_id     TEXT NULL,
+      ADD COLUMN IF NOT EXISTS asg_name               TEXT NULL,
+      ADD COLUMN IF NOT EXISTS capacity_provider_name TEXT NULL,
+      -- The AMI the launch template was built with, and when it was resolved.
+      -- Stored because the SSM parameter it came from moves: knowing the
+      -- running instances are three AMI releases behind is the entire input to
+      -- deciding whether to rotate them.
+      ADD COLUMN IF NOT EXISTS image_id               TEXT NULL,
+      ADD COLUMN IF NOT EXISTS image_resolved_at      TIMESTAMPTZ NULL,
+      ADD COLUMN IF NOT EXISTS provision_detail       TEXT NULL,
+      ADD COLUMN IF NOT EXISTS provisioned_at         TIMESTAMPTZ NULL
+  `);
+
   // Serves the "what still depends on this installation" check that
   // disconnecting runs.
   await db.query(`

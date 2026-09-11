@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm view *)",
+      "Bash(aws cloudformation *)",
+      "Bash(netstat -ano)",
+      "Bash(echo \"=== exit: $? ===\")",
+      "Bash(env)",
+      "PowerShell(Get-Process -Id 17792 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName; Write-Output \"---proxy env vars---\"; Get-ChildItem env: | Where-Object { $_.Name -match 'proxy' } | Select-Object Name,Value; Write-Output \"---user-scoped---\"; [Environment]::GetEnvironmentVariable\\('HTTP_PROXY','User'\\); [Environment]::GetEnvironmentVariable\\('HTTPS_PROXY','User'\\))",
+      "WebFetch(domain:docs.github.com)",
+      "Bash(npm install *)",
+      "Bash(npx vue-tsc *)",
+      "Bash(python -)",
+      "Bash(node -e ' *)",
+      "Bash(npx cdk *)",
+      "Bash(echo \"exit: $?\")",
+      "Read(//tmp/**)",
+      "Bash(grep -v \"vue-router\\\\|Try \\\\`npm i\")"
+    ]
+  }
+}

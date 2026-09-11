@@ -254,13 +254,20 @@ export function buildManifest(input: {
       checks: 'write',
     },
     /**
-     * `push` is the build trigger. The installation events are how this
-     * deployment learns it has been uninstalled or had its repositories
-     * changed — without them a revoked grant is only discovered when a build
-     * fails. Subscribed explicitly rather than relying on GitHub delivering
-     * App-lifecycle events unasked.
+     * `push` is the build trigger, and it is the ONLY thing that belongs here.
+     *
+     * `installation` and `installation_repositories` — how this deployment
+     * learns it has been uninstalled or had its repositories changed — must NOT
+     * be listed. GitHub delivers both to every App automatically ("All GitHub
+     * Apps receive this event by default. You cannot manually subscribe to this
+     * event"), so naming them is not belt-and-braces, it is invalid: the
+     * manifest is rejected outright with "Default events unsupported:
+     * installation and installation_repositories" and no App is created at all.
+     *
+     * The events still arrive once the webhook receiver exists and
+     * `hook_attributes.active` is turned on. Nothing is lost by omitting them.
      */
-    default_events: ['push', 'installation', 'installation_repositories'],
+    default_events: ['push'],
   };
 }
 

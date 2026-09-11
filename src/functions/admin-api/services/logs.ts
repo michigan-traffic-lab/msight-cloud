@@ -25,20 +25,58 @@ const MAX_RESULTS = 1000;
 const DEFAULT_RESULTS = 100;
 const MAX_WINDOW_HOURS = 24 * 14;
 
+/**
+ * This deployment's log group prefix.
+ *
+ * Read from the environment rather than hardcoded, because it is
+ * deployment-scoped: `logPrefix` defaults to the deployment name, so a stack
+ * called `msight-cloud` writes to `/msight-cloud/...` and a second one writes
+ * somewhere else entirely.
+ *
+ * It used to be the literal `/msight/`, which matched neither — every group
+ * this stack owns was silently excluded and the Logs page listed almost
+ * nothing. Falling back to the deployment name keeps that from recurring if the
+ * variable is ever dropped.
+ */
+function logPrefix(): string {
+  const prefix = process.env.LOG_PREFIX ?? process.env.DEPLOYMENT_NAME ?? 'msight';
+  return `/${prefix.replace(/^\/+|\/+$/g, '')}/`;
+}
+
 /** Groups belonging to this stack. Everything else in the account is not ours. */
 function belongsToStack(name: string): boolean {
   return (
     name.startsWith('/aws/lambda/MsightCloudStack-') ||
-    name.startsWith('/msight/') ||
+    name.startsWith(logPrefix()) ||
     name.includes('msight-cluster')
   );
 }
 
-function categorise(name: string): 'lambda' | 'container' | 'insights' | 'api' | 'other' {
+export type LogCategory =
+  | 'lambda'
+  | 'container'
+  | 'microservice'
+  | 'build'
+  | 'insights'
+  | 'api'
+  | 'other';
+
+/**
+ * What kind of thing wrote this group.
+ *
+ * Microservices get two categories of their own rather than being folded into
+ * 'container': their runtime logs and their build logs answer different
+ * questions, are retained separately, and are cleared separately.
+ */
+function categorise(name: string): LogCategory {
+  const prefix = logPrefix();
   if (name.startsWith('/aws/lambda/')) return 'lambda';
-  if (name.startsWith('/msight/sensor-consumer/')) return 'container';
+  if (name.startsWith(`${prefix}lambda/`)) return 'lambda';
+  if (name.startsWith(`${prefix}sensor-consumer/`)) return 'container';
+  if (name.startsWith(`${prefix}microservice-build/`)) return 'build';
+  if (name.startsWith(`${prefix}microservice/`)) return 'microservice';
   if (name.includes('containerinsights')) return 'insights';
-  if (name.startsWith('/msight/apigw/')) return 'api';
+  if (name.startsWith(`${prefix}apigw/`)) return 'api';
   return 'other';
 }
 

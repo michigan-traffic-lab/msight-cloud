@@ -7,6 +7,7 @@ import {
   signAppJwt,
 } from './app-auth';
 import type {
+  CloneToken,
   GithubAppIdentity,
   GithubInstallationInfo,
   GithubRepoInfo,
@@ -43,7 +44,7 @@ async function call(
   // Null for the one endpoint that takes no credentials: redeeming a manifest
   // code, which happens before this deployment has any.
   token: string | null,
-  init: { method?: string } = {}
+  init: { method?: string; body?: unknown } = {}
 ): Promise<GithubResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -54,9 +55,11 @@ async function call(
       headers: {
         accept: 'application/vnd.github+json',
         ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
         'x-github-api-version': API_VERSION,
         'user-agent': USER_AGENT,
       },
+      ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
       signal: controller.signal,
     });
 
@@ -208,10 +211,17 @@ export async function convertManifest(code: string): Promise<ManifestConversion>
 }
 
 /** Authenticated as the App itself. Cannot read any repository. */
-async function callAsApp(path: string, method?: string): Promise<GithubResponse> {
+async function callAsApp(
+  path: string,
+  method?: string,
+  body?: unknown
+): Promise<GithubResponse> {
   const credentials = await loadCredentials();
   const jwt = signAppJwt(credentials);
-  return call(path, jwt, method ? { method } : {});
+  return call(path, jwt, {
+    ...(method ? { method } : {}),
+    ...(body === undefined ? {} : { body }),
+  });
 }
 
 async function installationToken(installationId: number): Promise<string> {
@@ -329,6 +339,86 @@ export async function getInstallation(installationId: number): Promise<GithubIns
   }
 
   return toInstallation(response.body as Record<string, unknown>);
+}
+
+/**
+ * Mints a clone credential for one build.
+ *
+ * Deliberately NOT the cached token `callAsInstallation` uses. Two differences,
+ * both of which matter:
+ *
+ * **Scope.** This asks GitHub to narrow the token to a single repository and to
+ * `contents: read` alone. The cached token carries everything the installation
+ * grants across every repository it grants, which is far more than a build
+ * container needs and exactly what should not be sitting in a build
+ * environment.
+ *
+ * **Freshness.** A cached token may have minutes left. A build cloning with an
+ * almost-expired token fails partway through in a manner that looks like a
+ * network fault, so this always mints a new one — a full hour, every time.
+ *
+ * The token is returned to the in-VPC caller, which passes it straight into one
+ * StartBuild call. It is never logged, never stored, and never reaches a
+ * browser.
+ */
+export async function cloneToken(input: {
+  installationId: number;
+  repository: string;
+}): Promise<CloneToken> {
+  const [, repoName = ''] = input.repository.split('/');
+  if (!repoName) {
+    throw new GithubAuthError(
+      'bad_request',
+      `"${input.repository}" is not an owner/repo pair, so a token cannot be scoped to it.`
+    );
+  }
+
+  const response = await callAsApp(
+    `/app/installations/${input.installationId}/access_tokens`,
+    'POST',
+    {
+      // GitHub takes bare repository names here, not owner/repo — the owner is
+      // already implied by the installation.
+      repositories: [repoName],
+      permissions: { contents: 'read' },
+    }
+  );
+
+  if (response.status === 404) {
+    forgetInstallationToken(input.installationId);
+    throw new GithubAuthError(
+      'installation_not_found',
+      'GitHub no longer knows this installation, so no build token can be issued. ' +
+        'Someone uninstalled the App from the repository owner.',
+      404
+    );
+  }
+
+  if (response.status === 422) {
+    throw new GithubAuthError(
+      'repo_not_found',
+      `The installation does not grant ${input.repository}, so GitHub refused to issue a ` +
+        'token for it. Add the repository to the App installation on GitHub.',
+      422
+    );
+  }
+
+  if (response.status !== 201) {
+    raiseFor(response, 'minting a build token');
+  }
+
+  const body = response.body as { token?: unknown; expires_at?: unknown };
+  if (typeof body.token !== 'string') {
+    throw new GithubAuthError('github_unavailable', 'GitHub returned no build token.');
+  }
+
+  return {
+    token: body.token,
+    expires_at:
+      typeof body.expires_at === 'string'
+        ? body.expires_at
+        : new Date(Date.now() + 3600_000).toISOString(),
+  };
 }
 
 export async function deleteInstallation(installationId: number): Promise<{ deleted: boolean }> {

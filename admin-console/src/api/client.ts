@@ -620,7 +620,10 @@ export type ClusterScalingMode = 'fixed' | 'auto';
 export type GpuMode = 'shared' | 'exclusive';
 
 export interface ClusterUsage {
+  /** At most one — a cluster carries exactly one service. */
   services: number;
+  /** The service occupying it, or null if it is free to be assigned. */
+  service_name: string | null;
   max_tasks: number;
   committed_vram_mb: number;
   available_vram_mb: number;
@@ -642,7 +645,24 @@ export interface ComputeCluster {
   gpus_per_instance: number;
   gpu_vram_mb: number;
   gpu_mode: GpuMode;
-  provision_state: string;
+  /**
+   * 'not_provisioned' | 'provisioned' | 'drifted' | 'failed'.
+   *
+   * 'drifted' means the row was edited after being provisioned. Applying that
+   * edit replaces instances, so the console asks rather than doing it as a side
+   * effect of saving a form.
+   */
+  provision_state: ProvisionState;
+  // ── What provisioning created. All null on Fargate, which has no instances. ──
+  cluster_arn: string | null;
+  launch_template_id: string | null;
+  asg_name: string | null;
+  capacity_provider_name: string | null;
+  /** The AMI the launch template was built with, and when it was resolved. */
+  image_id: string | null;
+  image_resolved_at: string | null;
+  provision_detail: string | null;
+  provisioned_at: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -660,6 +680,18 @@ export interface ClusterCapacityInput {
   gpu_vram_mb?: number;
   gpu_mode?: GpuMode;
 }
+
+/**
+ * The hardware a microservice runs on, sent as part of creating it.
+ *
+ * Not a cluster to pick. A cluster carries exactly one service, so it is a
+ * property of the service: one is created automatically, named after the
+ * service, and provisioned along with it. There is deliberately no field here
+ * to name or select an existing cluster.
+ *
+ * Omitted means Fargate — nothing to manage, no cost when idle.
+ */
+export type ComputeInput = ClusterCapacityInput;
 
 export type ScalingMode = 'fixed' | 'auto';
 export type ScalingMetric = 'cpu' | 'memory';
@@ -694,8 +726,14 @@ export interface Microservice {
   checked_commit_sha: string | null;
   dockerfile_sha: string | null;
   dockerfile_size: number | null;
-  /** 'not_provisioned' until building and ECS deployment are wired up. */
-  provision_state: string;
+  /**
+   * 'not_provisioned' | 'scaffolded' | 'provisioned' | 'failed'.
+   *
+   * The lifecycle is deliberately four explicit steps: provisioning creates a
+   * repository and log groups and costs nothing, building spends CodeBuild
+   * minutes, deploying starts instances that bill by the second.
+   */
+  provision_state: ProvisionState;
   desired_count: number;
   cpu: number;
   memory: number;
@@ -711,9 +749,271 @@ export interface Microservice {
   /** Null until assigned — a service with no cluster has nowhere to run. */
   cluster_name: string | null;
   gpu_vram_mb: number;
+  // ── What provisioning created. Null until it has run. ──────────────────
+  ecr_repository_name: string | null;
+  ecr_repository_uri: string | null;
+  build_project_name: string | null;
+  log_group_name: string | null;
+  /** Null means never expire. */
+  log_retention_days: number | null;
+  service_arn: string | null;
+  task_definition_arn: string | null;
+  image_tag: string | null;
+  image_digest: string | null;
+  provision_detail: string | null;
+  provisioned_at: string | null;
+  // ── The last image build. ──────────────────────────────────────────────
+  build_id: string | null;
+  build_state: BuildState;
+  build_detail: string | null;
+  /**
+   * The commit the running image was built from. Against `checked_commit_sha`
+   * — the branch head as of the last look at GitHub — this is what separates
+   * "deployed" from "up to date".
+   */
+  build_commit_sha: string | null;
+  build_started_at: string | null;
+  build_finished_at: string | null;
+  build_log_group: string | null;
+  build_log_stream: string | null;
+  // ── The standing instruction to get this running. ──────────────────────
+  /**
+   * How far an automatic bring-up has got. A different axis from
+   * `provision_state`, which says what exists on AWS: this says whether anyone
+   * is still waiting for the service to come up.
+   */
+  launch_state: LaunchState;
+  launch_detail: string | null;
+  launch_requested_by: string | null;
+  launch_requested_at: string | null;
+  launch_finished_at: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+
+export type ProvisionState = 'not_provisioned' | 'scaffolded' | 'provisioned' | 'failed' | 'drifted';
+
+export type BuildState = 'never' | 'queued' | 'building' | 'succeeded' | 'failed' | 'stopped';
+
+/** A build that has neither finished nor failed — the console keeps polling. */
+export function buildRunning(state: BuildState): boolean {
+  return state === 'queued' || state === 'building';
+}
+
+/**
+ * How far an automatic bring-up has got.
+ *
+ * Creating a service asks its questions once and then takes every step those
+ * answers were for: the cluster, the image repository and log groups, the image
+ * build, and the ECS service. This is where in that sequence it is.
+ */
+export type LaunchState =
+  | 'none'
+  | 'requested'
+  | 'provisioning'
+  | 'building'
+  | 'deploying'
+  | 'running'
+  | 'failed';
+
+/**
+ * A launch still in progress — the console polls while this is true.
+ *
+ * 'running' and 'failed' are both finished; 'none' is a service nobody asked to
+ * launch. Everything else is waiting on something.
+ */
+export function launchInFlight(state: LaunchState): boolean {
+  return (
+    state === 'requested' ||
+    state === 'provisioning' ||
+    state === 'building' ||
+    state === 'deploying'
+  );
+}
+
+/** Where a launch got to, and what it did on the way. */
+export interface LaunchStatus {
+  name: string;
+  launch_state: LaunchState;
+  launch_detail: string | null;
+  provision_state: ProvisionState;
+  build_state: BuildState;
+  steps: string[];
+  error: string | null;
+}
+
+/** One entry from the server-held instance catalog. */
+export interface InstanceType {
+  name: string;
+  family: string;
+  vcpu: number;
+  memoryMib: number;
+  gpus: number;
+  /** Per card, not the total across cards. */
+  gpuVramMb: number;
+  gpuModel: string | null;
+  note?: string;
+  /**
+   * The largest task memory this type can actually run: the agent and the OS
+   * take the rest, and a task sized past this sits PENDING forever.
+   */
+  task_memory_ceiling: number;
+}
+
+/** What ECS actually has, as opposed to what the cluster row asked for. */
+export interface ClusterHealth {
+  exists: boolean;
+  status: string | null;
+  registered_instances: number;
+  disconnected_instances: number;
+  running_tasks: number;
+  pending_tasks: number;
+  registered_cpu: number;
+  remaining_cpu: number;
+  registered_memory_mib: number;
+  remaining_memory_mib: number;
+  registered_gpus: number;
+  remaining_gpus: number;
+  instances: ClusterNode[];
+}
+
+/**
+ * One container instance, with what it has and what is left of it.
+ *
+ * Both halves, because neither is usable alone: "3072 CPU units remaining" says
+ * nothing without the size of the box it is remaining on.
+ */
+export interface ClusterNode {
+  id: string;
+  ec2_instance_id: string | null;
+  status: string | null;
+  agent_connected: boolean;
+  agent_version: string | null;
+  running_tasks: number;
+  pending_tasks: number;
+  registered_cpu: number;
+  remaining_cpu: number;
+  registered_memory_mib: number;
+  remaining_memory_mib: number;
+  registered_gpus: number;
+  remaining_gpus: number;
+}
+
+/**
+ * One logged line.
+ *
+ * stdout and stderr are not distinguished, because CloudWatch does not
+ * distinguish them: the awslogs driver and CodeBuild both write one interleaved
+ * stream in the order the process produced it. That interleaving is the useful
+ * part — it shows which output the failure followed.
+ */
+export interface LogEvent {
+  timestamp: string;
+  message: string;
+  /** The stream it came from: one per task on a container log. */
+  stream: string | null;
+}
+
+/** One stream in the group, for choosing between them without reading them. */
+export interface LogStreamInfo {
+  name: string;
+  last_event_at: string | null;
+}
+
+export interface LogTail {
+  source: 'container' | 'build';
+  log_group: string | null;
+  /** The streams actually read. */
+  streams: string[];
+  /**
+   * Every stream in the group — not the same as the ones read. A container log
+   * has one stream per container per task, so this is the list of tasks that
+   * have ever written, newest first.
+   */
+  available: LogStreamInfo[];
+  /** Oldest first, so it reads like a terminal. */
+  events: LogEvent[];
+  /** Older lines exist before the first one here. */
+  truncated: boolean;
+}
+
+export interface ClusterHealthResponse {
+  cluster: ComputeCluster;
+  ecs_cluster_name: string;
+  health: ClusterHealth | null;
+  instance: InstanceType | null;
+  /**
+   * Whether ECS sees the GPUs the row promises. False means the instances are
+   * up but nothing GPU-bound will ever place on them — almost always the wrong
+   * AMI. Null when the cluster has no GPUs or is not provisioned.
+   */
+  gpu_visible: boolean | null;
+  fetched_at: string;
+}
+
+/** What a deployed service is doing right now. */
+export interface ServiceRuntime {
+  exists: boolean;
+  status: string | null;
+  desired_count: number;
+  running_count: number;
+  pending_count: number;
+  task_definition: string | null;
+  rollout_state: string | null;
+  rollout_detail: string | null;
+  /**
+   * ECS service events, newest first. The only place a placement failure is
+   * ever explained — "unable to place a task because no container instance met
+   * all of its requirements" exists nowhere else.
+   */
+  events: Array<{ at: string; message: string }>;
+  tasks: Array<{
+    arn: string;
+    last_status: string | null;
+    health_status: string | null;
+    started_at: string | null;
+    stopped_reason: string | null;
+    /**
+     * Null on Fargate, which has no instances. This is what attributes a log
+     * stream to a machine: a stream is named after the task, never the host, so
+     * "which node wrote this" is a join through here.
+     */
+    container_instance: string | null;
+    availability_zone: string | null;
+  }>;
+}
+
+export interface LogGroupSummary {
+  name: string;
+  stored_bytes: number;
+  retention_days: number | null;
+  created_at: string | null;
+}
+
+export interface MicroserviceStatus {
+  microservice: Microservice;
+  runtime: ServiceRuntime | null;
+  image: { digest: string | null; size_bytes: number | null; pushed_at: string | null } | null;
+  logs: LogGroupSummary | null;
+  build_logs: LogGroupSummary | null;
+  ecs_service_name: string;
+  ecs_cluster_name: string | null;
+  /**
+   * The branch has commits the running image does not contain. Null when either
+   * sha is unknown — "we cannot tell" and "it is current" are different answers
+   * and only one justifies prompting for a rebuild.
+   */
+  image_stale: boolean | null;
+  fetched_at: string;
+}
+
+/** What a provision/deprovision attempt did, step by step. */
+export interface ProvisionResult {
+  name: string;
+  provision_state: ProvisionState;
+  steps: string[];
+  error: string | null;
 }
 
 export interface MicroserviceSource {
@@ -1232,16 +1532,34 @@ export const api = {
    * Registers a microservice. Refused unless the Dockerfile is actually there —
    * the source is checked against GitHub before anything is stored.
    */
+  /**
+   * Registers a microservice and creates its dedicated cluster.
+   *
+   * The cluster is not optional and not chosen: it is named after the service
+   * and created in the same transaction, so a service that fails to save leaves
+   * nothing behind. `compute` says what hardware it gets; omitted means
+   * Fargate.
+   */
   microserviceCreate: (
     input: {
       name: string;
       display_name?: string | null;
       installation_id: number;
       repo_id: number;
+      compute?: ComputeInput;
+      /**
+       * Bring it up as well as register it.
+       *
+       * Records the decision on the row, which is what makes it survive this
+       * tab: the server's reconcile starts anything left waiting. It does not
+       * do the work inside this request — call `microserviceLaunch` next for
+       * that, which is the same work without the five-minute wait.
+       */
+      launch?: boolean;
     } & MicroserviceSource &
       MicroserviceRuntime
   ) =>
-    request<{ microservice: Microservice; repo: GithubRepo }>(
+    request<{ microservice: Microservice; repo: GithubRepo; cluster: ComputeCluster }>(
       'POST',
       '/v1/admin/microservices',
       input
@@ -1269,9 +1587,169 @@ export const api = {
       `/v1/admin/microservices/${encodeURIComponent(name)}/check`
     ),
 
-  microserviceRemove: (name: string) =>
-    request<{ name: string; removed: boolean; infrastructure_removed: boolean }>(
+  /**
+   * Deletes the service outright: AWS resources, its cluster, and both rows.
+   *
+   * Both extras default to false server-side. Deleting the images throws away
+   * every build; deleting the logs throws away the record of why the service
+   * was being deleted.
+   */
+  microserviceRemove: (
+    name: string,
+    options: { delete_images?: boolean; delete_logs?: boolean } = {}
+  ) =>
+    request<{
+      name: string;
+      removed: boolean;
+      steps: string[];
+      deleted_images: boolean;
+      deleted_logs: boolean;
+    }>(
       'DELETE',
-      `/v1/admin/microservices/${encodeURIComponent(name)}`
+      `/v1/admin/microservices/${encodeURIComponent(name)}` +
+        `?delete_images=${options.delete_images === true}` +
+        `&delete_logs=${options.delete_logs === true}`
+    ),
+
+  // ── Provisioning ────────────────────────────────────────────────────────
+
+  /** The instance catalog, served rather than duplicated in the console. */
+  instanceTypes: (signal?: AbortSignal) =>
+    request<{ instance_types: InstanceType[]; memory_overhead_mib: number }>(
+      'GET',
+      '/v1/admin/clusters/instance-types',
+      undefined,
+      signal
+    ),
+
+  clusterHealth: (name: string, signal?: AbortSignal) =>
+    request<ClusterHealthResponse>(
+      'GET',
+      `/v1/admin/clusters/${encodeURIComponent(name)}/health`,
+      undefined,
+      signal
+    ),
+
+  clusterProvision: (name: string) =>
+    request<ProvisionResult>('POST', `/v1/admin/clusters/${encodeURIComponent(name)}/provision`),
+
+  clusterDeprovision: (name: string) =>
+    request<ProvisionResult>('POST', `/v1/admin/clusters/${encodeURIComponent(name)}/deprovision`),
+
+  /**
+   * One service's registry row, live ECS state, image and logs.
+   *
+   * Also advances the recorded build state as a side effect: CodeBuild has no
+   * callback wired up, so the state moves when something asks.
+   */
+  microserviceStatus: (name: string, signal?: AbortSignal) =>
+    request<MicroserviceStatus>(
+      'GET',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/status`,
+      undefined,
+      signal
+    ),
+
+  /**
+   * Everything at once: cluster, scaffolding, image build, and the service.
+   *
+   * Returns as soon as the build is running — the deploy happens when the build
+   * lands, driven by `microserviceStatus` while the console is open and by the
+   * server's own five-minute reconcile when it is not. So a launch finishes
+   * even if this tab is closed.
+   */
+  microserviceLaunch: (name: string) =>
+    request<LaunchStatus>('POST', `/v1/admin/microservices/${encodeURIComponent(name)}/launch`),
+
+  /** Stops waiting on a launch. Changes nothing AWS has. */
+  microserviceLaunchDismiss: (name: string) =>
+    request<{ microservice: Microservice }>(
+      'POST',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/launch/dismiss`
+    ),
+
+  /**
+   * The last lines of one of a service's two logs.
+   *
+   * A tail, not a search: the Logs page owns search, and an Insights query
+   * takes seconds to answer "what did the build just print". 'build' reads the
+   * exact stream the last build wrote; 'container' merges the newest task
+   * streams.
+   */
+  microserviceLogs: (
+    name: string,
+    source: 'container' | 'build',
+    limit = 200,
+    /**
+     * One task's stream, by name. Omitted merges the newest few, which is right
+     * while tasks are being replaced and wrong when one task is misbehaving.
+     */
+    stream?: string | null,
+    signal?: AbortSignal
+  ) =>
+    request<LogTail>(
+      'GET',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/logs` +
+        `?source=${source}&limit=${limit}` +
+        (stream ? `&stream=${encodeURIComponent(stream)}` : ''),
+      undefined,
+      signal
+    ),
+
+  microserviceProvision: (name: string) =>
+    request<ProvisionResult & { repository_uri: string | null }>(
+      'POST',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/provision`
+    ),
+
+  microserviceBuild: (name: string) =>
+    request<{ name: string; build_id: string; image_tag: string; build_state: BuildState }>(
+      'POST',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/build`
+    ),
+
+  microserviceBuildStop: (name: string) =>
+    request<{ steps: string[]; error: string | null }>(
+      'POST',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/build/stop`
+    ),
+
+  microserviceDeploy: (name: string) =>
+    request<ProvisionResult>('POST', `/v1/admin/microservices/${encodeURIComponent(name)}/deploy`),
+
+  microserviceRestart: (name: string) =>
+    request<{ steps: string[]; error: string | null }>(
+      'POST',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/restart`
+    ),
+
+  /**
+   * Both destructive extras default to false server-side: deleting the images
+   * throws away every build, and deleting the logs throws away the record of
+   * why the service was misbehaving.
+   */
+  microserviceDeprovision: (
+    name: string,
+    input: { delete_images?: boolean; delete_logs?: boolean } = {}
+  ) =>
+    request<ProvisionResult>(
+      'POST',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/deprovision`,
+      input
+    ),
+
+  /** `null` retention means never expire. */
+  microserviceLogRetention: (name: string, retentionDays: number | null) =>
+    request<{ steps: string[]; error: string | null }>(
+      'PUT',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/logs/retention`,
+      { retention_days: retentionDays }
+    ),
+
+  microserviceLogsClear: (name: string, scope: 'container' | 'build' | 'both' = 'both') =>
+    request<{ steps: string[]; error: string | null }>(
+      'POST',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/logs/clear`,
+      { scope }
     ),
 };

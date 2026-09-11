@@ -33,6 +33,34 @@ const routes: RouteRecordRaw[] = [
       { path: '', redirect: '/overview' },
       ...featureRoutes,
       {
+        /**
+         * One microservice, in full.
+         *
+         * Not a feature, because it has no sidebar entry of its own: it is
+         * reached by choosing a service from the list, and a sidebar link would
+         * have nothing to point at. Its role floor matches the list it is
+         * reached from.
+         */
+        path: 'microservices/:name',
+        name: 'microservice',
+        component: () => import('@/pages/MicroservicePage.vue'),
+        meta: { title: 'Microservice', minRole: 'operator' },
+      },
+      {
+        /**
+         * The GitHub App, opened from Settings.
+         *
+         * Not a feature for the same reason the service page is not: it is
+         * reached from a list rather than from the sidebar, and a second
+         * top-level entry for one integration would crowd out everything
+         * settings will hold later.
+         */
+        path: 'settings/github',
+        name: 'github-settings',
+        component: () => import('@/pages/GithubSettingsPage.vue'),
+        meta: { title: 'GitHub App', minRole: 'operator' },
+      },
+      {
         // Not a feature, so it is written out here rather than generated: it has
         // no sidebar entry and is never navigated to from inside the console.
         // GitHub redirects the browser here after an App install, because a

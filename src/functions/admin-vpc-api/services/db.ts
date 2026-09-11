@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { HttpError } from '../../../shared/admin-api/http';
 
@@ -32,6 +32,46 @@ async function loadCredentials(): Promise<{ username: string; password: string }
     throw new HttpError(500, 'not_configured', 'Database secret is missing username/password.');
   }
   return { username: parsed.username, password: parsed.password };
+}
+
+/**
+ * Runs a callback inside one transaction, on one connection.
+ *
+ * Needed wherever two rows have to appear together or not at all. The case that
+ * forced it: creating a microservice and the cluster it runs on in a single
+ * console action. Those are two inserts across two tables joined by a foreign
+ * key, and a failure between them would leave an empty cluster nobody asked for
+ * — which then has to be found and deleted by hand, because the console has no
+ * concept of a cluster that exists by accident.
+ *
+ * The pool caps at 2 connections, so a transaction holds half the container's
+ * capacity while it runs. Keep the callback to database work: no AWS calls, no
+ * GitHub round trips.
+ *
+ * ROLLBACK failures are swallowed deliberately. If the connection died, the
+ * transaction is already gone, and throwing here would replace the real error
+ * with a meaningless one.
+ */
+export async function withTransaction<T>(
+  work: (client: PoolClient) => Promise<T>
+): Promise<T> {
+  const pool = await getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await work(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      console.error('rollback failed', rollbackError);
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function getPool(): Promise<Pool> {

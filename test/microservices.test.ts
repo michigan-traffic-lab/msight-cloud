@@ -364,14 +364,17 @@ describe('one-click GitHub App creation', () => {
     expect(manifest.default_permissions.contents).toBe('read');
   });
 
-  it('subscribes to the push event that triggers a build', () => {
+  it('subscribes to push, and to nothing GitHub sends unasked', () => {
     // `push` is entitled by `contents: read` — webhook events are gated on the
     // permission covering their data, so watching a branch needs no extra
-    // scope. The installation events are how a revoked grant is noticed
-    // without waiting for a build to fail.
-    expect(manifest.default_events).toEqual(
-      expect.arrayContaining(['push', 'installation', 'installation_repositories'])
-    );
+    // scope.
+    //
+    // Pinned as an EXACT list because the obvious-looking additions are fatal.
+    // `installation` and `installation_repositories` go to every App
+    // automatically and cannot be subscribed to, so listing them does not
+    // over-request — it makes GitHub reject the whole manifest with "Default
+    // events unsupported" and create no App. This shipped that way once.
+    expect(manifest.default_events).toEqual(['push']);
   });
 
   it('points both redirect and setup URLs at the console, not the API', () => {

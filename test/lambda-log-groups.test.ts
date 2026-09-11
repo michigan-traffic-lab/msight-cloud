@@ -113,6 +113,39 @@ describe('lambda log groups', () => {
   });
 });
 
+/**
+ * Functions that name log groups at runtime must be told the prefix to use.
+ *
+ * `names()` defaults `logPrefix` to the deployment name, and this deployment
+ * overrides it: `msight-cloud` logs under `/msight/`. A function that is not
+ * given LOG_PREFIX therefore derives a different name from the one its own IAM
+ * policy is scoped to, and every attempt to create or read a log group is
+ * denied. That has happened twice — once on the Logs page, which matched none
+ * of its own groups, and once on microservice provisioning, which could not
+ * create them at all.
+ *
+ * Source text rather than a synthesized template, for the same reason as the
+ * checks above: synthesis needs Docker for the image assets.
+ */
+describe('runtime log group naming', () => {
+  const source = fs.readFileSync(STACK_SOURCE, 'utf8');
+  const lambdas = lambdaDefinitions(source);
+
+  /**
+   * The two that derive log group names at runtime: the Logs page reads them,
+   * and microservice provisioning creates them. Both are scoped by IAM to the
+   * `logPrefix` form, so both have to be told what it is.
+   */
+  const NAMES_LOG_GROUPS = ['AdminApiLambda', 'AdminVpcApiLambda'];
+
+  it.each(NAMES_LOG_GROUPS)('gives %s the deployment log prefix', (id) => {
+    const fn = lambdas.find((candidate) => candidate.id === id);
+    // A stale id would otherwise make this pass by finding nothing.
+    expect(fn).toBeDefined();
+    expect(fn!.props).toContain('LOG_PREFIX: name.logPrefix');
+  });
+});
+
 describe('log retention config', () => {
   it('accepts the values CloudWatch supports and fills in defaults', () => {
     const config = logRetentionFromContext({ lambda: 30, api: 1 });

@@ -27,6 +27,19 @@ export const DEPLOYMENT_TAG_KEY = 'msight:deployment';
 export const SENSOR_TAG_KEY = 'msight:sensor';
 
 /**
+ * Tag key naming which microservice a runtime-created resource belongs to.
+ *
+ * Carries the same weight as `SENSOR_TAG_KEY`: it is how the teardown reaper
+ * finds an ECR repository, a build project or a scaling group that Aurora no
+ * longer remembers, and how the Cost page attributes an instance-hour to a
+ * service rather than to the account at large.
+ */
+export const MICROSERVICE_TAG_KEY = 'msight:microservice';
+
+/** Tag key naming which compute cluster a resource belongs to. */
+export const COMPUTE_CLUSTER_TAG_KEY = 'msight:cluster';
+
+/**
  * Tag key recording whether this deployment created a storage bucket or adopted
  * one that already existed. Kept beside the other tag keys so the vocabulary is
  * discoverable in one place; the tag set itself is assembled in resource-tags.
@@ -64,6 +77,13 @@ export interface ResourceNameOverrides {
   sensorConsumerTaskRole?: string;
   /** Per-sensor queues and services are named `<prefix>-<sensor>`. */
   sensorResourcePrefix?: string;
+  /**
+   * Microservice-owned resources are named `<prefix>-<service>` and compute
+   * clusters `<prefix>-cluster-<cluster>`. Separate from the sensor prefix so
+   * the reaper's name patterns and the IAM conditions scoped to them cannot
+   * match each other's resources.
+   */
+  microserviceResourcePrefix?: string;
   /** CloudWatch log groups are named `/<prefix>/...`. */
   logPrefix?: string;
   httpApi?: string;
@@ -80,6 +100,11 @@ export interface ResourceNames {
   cluster: string;
   sensorConsumerTaskRole: string;
   sensorResourcePrefix: string;
+  microserviceResourcePrefix: string;
+  microserviceTaskRole: string;
+  microserviceExecutionRole: string;
+  microserviceBuildRole: string;
+  microserviceInstanceRole: string;
   logPrefix: string;
   httpApi: string;
   sensorHttpApi: string;
@@ -88,6 +113,10 @@ export interface ResourceNames {
   adminUserPool: string;
   apiAccessLogGroup: (id: string) => string;
   sensorLogGroup: (sensorName: string) => string;
+  /** Where a microservice's containers write. One group per service. */
+  microserviceLogGroup: (service: string) => string;
+  /** Where its image builds write. Separate so retention can differ. */
+  microserviceBuildLogGroup: (service: string) => string;
 }
 
 export function names(
@@ -95,6 +124,7 @@ export function names(
   overrides: ResourceNameOverrides = {}
 ): ResourceNames {
   const logPrefix = overrides.logPrefix ?? deployment;
+  const microservicePrefix = overrides.microserviceResourcePrefix ?? `${deployment}-ms`;
 
   return {
     sensorTopic: overrides.sensorTopic ?? `${deployment}-sensor-topic.fifo`,
@@ -104,6 +134,11 @@ export function names(
     sensorConsumerTaskRole:
       overrides.sensorConsumerTaskRole ?? `${deployment}-sensor-consumer-task-role`,
     sensorResourcePrefix: overrides.sensorResourcePrefix ?? `${deployment}-sensor`,
+    microserviceResourcePrefix: microservicePrefix,
+    microserviceTaskRole: `${deployment}-microservice-task-role`,
+    microserviceExecutionRole: `${deployment}-microservice-execution-role`,
+    microserviceBuildRole: `${deployment}-microservice-build-role`,
+    microserviceInstanceRole: `${deployment}-microservice-instance-role`,
     logPrefix,
     httpApi: overrides.httpApi ?? `${deployment}-http-api`,
     sensorHttpApi: overrides.sensorHttpApi ?? `${deployment}-sensor-http-api`,
@@ -112,6 +147,49 @@ export function names(
     adminUserPool: overrides.adminUserPool ?? `${deployment}-admin-pool`,
     apiAccessLogGroup: (id: string) => `/${logPrefix}/apigw/${id}`,
     sensorLogGroup: (sensorName: string) => `/${logPrefix}/sensor-consumer/${sensorName}`,
+    microserviceLogGroup: (service: string) => `/${logPrefix}/microservice/${service}`,
+    microserviceBuildLogGroup: (service: string) => `/${logPrefix}/microservice-build/${service}`,
+  };
+}
+
+/**
+ * Names for the resources one microservice owns.
+ *
+ * Derived in one place because five callers need the same strings — the
+ * provisioner that creates them, the console that displays them, the reconciler
+ * that compares them, the reaper that deletes them, and the IAM conditions in
+ * the stack that scope who may touch them. A second derivation would drift, and
+ * the failure mode is a resource nothing recognises as its own: still billing,
+ * invisible to the console, immune to teardown.
+ *
+ * Names are already constrained at registration (`^[a-z][a-z0-9-]{1,31}$`), so
+ * nothing needs escaping here.
+ */
+export function microserviceNames(prefix: string, service: string) {
+  return {
+    /** ECR allows slashes, and a path segment keeps one deployment's repositories together. */
+    ecrRepository: `${prefix}/${service}`,
+    buildProject: `${prefix}-build-${service}`,
+    /** ECS service name, unique within its cluster. */
+    service: `${prefix}-${service}`,
+    /** Task definition family. Revisions accumulate under it. */
+    taskFamily: `${prefix}-${service}`,
+  };
+}
+
+/** Names for the resources one compute cluster owns. */
+export function computeClusterNames(prefix: string, cluster: string) {
+  return {
+    /** The ECS cluster itself. */
+    cluster: `${prefix}-cluster-${cluster}`,
+    launchTemplate: `${prefix}-lt-${cluster}`,
+    autoScalingGroup: `${prefix}-asg-${cluster}`,
+    /**
+     * Capacity provider names are immutable and cannot be reused after
+     * deletion for a period, which is why this is derived from the cluster name
+     * rather than being made unique per attempt.
+     */
+    capacityProvider: `${prefix}-cp-${cluster}`,
   };
 }
 

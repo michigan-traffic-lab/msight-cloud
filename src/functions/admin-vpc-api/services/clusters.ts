@@ -1,5 +1,6 @@
 import { HttpError } from '../../../shared/admin-api/http';
 import { ensureMicroserviceSchema } from '../../../shared/microservice-schema';
+import { instanceSpec } from '../../../shared/instance-catalog';
 import { getPool } from './db';
 
 /**
@@ -65,14 +66,26 @@ export interface ClusterRow {
   gpu_vram_mb: number;
   gpu_mode: GpuMode;
   provision_state: string;
+  // ── What provisioning created. All null on Fargate, which has no instances. ──
+  cluster_arn: string | null;
+  launch_template_id: string | null;
+  asg_name: string | null;
+  capacity_provider_name: string | null;
+  /** The AMI the launch template was built with, and when it was resolved. */
+  image_id: string | null;
+  image_resolved_at: string | null;
+  provision_detail: string | null;
+  provisioned_at: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
 }
 
-const COLUMNS = `name, display_name, capacity_type, instance_type, scaling_mode,
+export const COLUMNS = `name, display_name, capacity_type, instance_type, scaling_mode,
                  min_instances, max_instances, target_capacity, gpus_per_instance,
-                 gpu_vram_mb, gpu_mode, provision_state, created_by, created_at, updated_at`;
+                 gpu_vram_mb, gpu_mode, provision_state, cluster_arn, launch_template_id,
+                 asg_name, capacity_provider_name, image_id, image_resolved_at,
+                 provision_detail, provisioned_at, created_by, created_at, updated_at`;
 
 function toRow(row: Record<string, unknown>): ClusterRow {
   return {
@@ -88,10 +101,26 @@ function toRow(row: Record<string, unknown>): ClusterRow {
     gpu_vram_mb: Number(row.gpu_vram_mb),
     gpu_mode: String(row.gpu_mode) === 'exclusive' ? 'exclusive' : 'shared',
     provision_state: String(row.provision_state),
+    cluster_arn: text(row.cluster_arn),
+    launch_template_id: text(row.launch_template_id),
+    asg_name: text(row.asg_name),
+    capacity_provider_name: text(row.capacity_provider_name),
+    image_id: text(row.image_id),
+    image_resolved_at: iso(row.image_resolved_at),
+    provision_detail: text(row.provision_detail),
+    provisioned_at: iso(row.provisioned_at),
     created_by: String(row.created_by),
     created_at: new Date(row.created_at as string).toISOString(),
     updated_at: new Date(row.updated_at as string).toISOString(),
   };
+}
+
+function text(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+function iso(value: unknown): string | null {
+  return value === null || value === undefined ? null : new Date(value as string).toISOString();
 }
 
 async function ensureSchema(): Promise<void> {
@@ -210,6 +239,39 @@ export function normalizeCluster(input: ClusterSettings): NormalizedCluster {
     );
   }
 
+  /**
+   * Cross-check against the catalog, when the type is one we know.
+   *
+   * The failure this prevents is quiet and expensive: `g4dn.xlarge` saved with
+   * `gpusPerInstance: 0` provisions from the standard AMI with no driver, comes
+   * up perfectly healthy, registers zero GPUs, and every GPU task then sits
+   * PENDING with a placement message nobody reads. The instance bills the whole
+   * time. An uncatalogued type is left alone — that is the documented escape
+   * hatch — but a known one is held to what the hardware actually is.
+   */
+  const catalogued = instanceSpec(instanceType);
+  if (catalogued) {
+    if (gpusPerInstance > catalogued.gpus) {
+      throw new HttpError(
+        400,
+        'gpu_count_mismatch',
+        `${catalogued.name} has ${catalogued.gpus} GPU(s), not ${gpusPerInstance}. ` +
+          (catalogued.gpus === 0
+            ? 'It is a CPU-only instance type — pick a G or P family type for GPU work.'
+            : 'Correct the count, or pick a larger type in the same family.')
+      );
+    }
+    if (gpusPerInstance > 0 && gpuVramMb > catalogued.gpuVramMb) {
+      throw new HttpError(
+        400,
+        'gpu_vram_mismatch',
+        `Each ${catalogued.name} card has ${catalogued.gpuVramMb} MiB of video memory, ` +
+          `not ${gpuVramMb} MiB. Overstating it defeats the overcommit check that this ` +
+          'figure exists for.'
+      );
+    }
+  }
+
   // A fixed cluster of one instance has no headroom: replacing that instance —
   // a deploy, a patch, a spot reclaim — stops its tasks before new ones can
   // start. Allowed, because it is right for batch work, but not silently.
@@ -237,8 +299,16 @@ export function normalizeCluster(input: ClusterSettings): NormalizedCluster {
 }
 
 export interface ClusterUsage {
-  /** Microservices assigned here. */
+  /** Microservices assigned here. At most one — a cluster carries one service. */
   services: number;
+  /**
+   * The service that occupies it, or null if it is free.
+   *
+   * Named rather than merely counted so the console can say "carries detector"
+   * in the assignment picker instead of silently omitting the cluster and
+   * leaving the operator to wonder where it went.
+   */
+  service_name: string | null;
   /** Their task counts added up — the ceiling under autoscaling. */
   max_tasks: number;
   /** Video memory those services expect to need, per instance. */
@@ -265,6 +335,7 @@ export async function clusterUsage(): Promise<Map<string, ClusterUsage>> {
   const { rows } = await pool.query(
     `SELECT c.name,
             count(m.name)::int                            AS services,
+            min(m.name)                                   AS service_name,
             COALESCE(sum(GREATEST(m.desired_count, m.max_tasks)), 0)::int AS max_tasks,
             COALESCE(sum(m.gpu_vram_mb), 0)::int          AS committed_vram_mb,
             c.gpu_vram_mb                                 AS available_vram_mb,
@@ -282,6 +353,7 @@ export async function clusterUsage(): Promise<Map<string, ClusterUsage>> {
         String(row.name),
         {
           services: Number(row.services ?? 0),
+          service_name: row.service_name == null ? null : String(row.service_name),
           max_tasks: Number(row.max_tasks ?? 0),
           committed_vram_mb: committed,
           available_vram_mb: available,
@@ -307,6 +379,7 @@ export async function listClusters() {
       ...cluster,
       usage: usage.get(cluster.name) ?? {
         services: 0,
+        service_name: null,
         max_tasks: 0,
         committed_vram_mb: 0,
         available_vram_mb: cluster.gpu_vram_mb,
@@ -331,26 +404,40 @@ export async function requireCluster(name: string): Promise<ClusterRow> {
   return toRow(rows[0]);
 }
 
-export async function createCluster(input: {
-  name: string;
-  displayName?: string | null;
-  settings: ClusterSettings;
-  actor: string;
-}): Promise<ClusterRow> {
-  await ensureSchema();
+/** The subset of a pg Pool or PoolClient these inserts need. */
+interface Executor {
+  query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
+}
 
+/**
+ * Inserts a cluster row on a given executor.
+ *
+ * Split out from {@link createCluster} so it can run inside a caller's
+ * transaction. The one caller that needs that is creating a microservice
+ * together with the cluster it runs on: two inserts that must both land, since
+ * a cluster created for a service that then failed to save is litter the
+ * console has no way to describe.
+ */
+export async function insertCluster(
+  db: Executor,
+  input: {
+    name: string;
+    displayName?: string | null;
+    settings: ClusterSettings;
+    actor: string;
+  }
+): Promise<ClusterRow> {
   const problem = clusterNameProblem(input.name);
   if (problem) throw new HttpError(400, 'invalid_cluster_name', problem);
 
   const settings = normalizeCluster(input.settings);
-  const pool = await getPool();
 
-  const existing = await pool.query('SELECT 1 FROM compute_clusters WHERE name = $1', [input.name]);
+  const existing = await db.query('SELECT 1 FROM compute_clusters WHERE name = $1', [input.name]);
   if (existing.rowCount && existing.rowCount > 0) {
     throw new HttpError(409, 'cluster_exists', `A cluster named "${input.name}" already exists.`);
   }
 
-  const { rows } = await pool.query(
+  const { rows } = await db.query(
     `INSERT INTO compute_clusters
        (name, display_name, capacity_type, instance_type, scaling_mode, min_instances,
         max_instances, target_capacity, gpus_per_instance, gpu_vram_mb, gpu_mode, created_by)
@@ -386,6 +473,35 @@ export async function createCluster(input: {
   return toRow(rows[0]);
 }
 
+export async function createCluster(input: {
+  name: string;
+  displayName?: string | null;
+  settings: ClusterSettings;
+  actor: string;
+}): Promise<ClusterRow> {
+  await ensureSchema();
+  return insertCluster(await getPool(), input);
+}
+
+/**
+ * Whether a cluster already carries a service, and which one.
+ *
+ * A cluster holds exactly one service, so this is what the assignment picker
+ * and every save have to consult. Without it the unique index refuses the
+ * insert and the operator gets a constraint violation instead of the name of
+ * the service already sitting there.
+ */
+export async function clusterOccupant(
+  db: Executor,
+  clusterName: string
+): Promise<string | null> {
+  const { rows } = await db.query(
+    'SELECT name FROM microservice_clusters WHERE cluster_name = $1 LIMIT 1',
+    [clusterName]
+  );
+  return rows.length > 0 ? String(rows[0].name) : null;
+}
+
 export async function updateCluster(input: {
   name: string;
   displayName?: string | null;
@@ -408,6 +524,19 @@ export async function updateCluster(input: {
     );
   }
 
+  /**
+   * An edit to a provisioned cluster marks it drifted rather than applying
+   * itself.
+   *
+   * Changing an instance type or a scaling bound means a new launch template
+   * version and a scaling group update, and on a GPU change possibly a
+   * different AMI — none of which should happen as a side effect of saving a
+   * form. 'drifted' is what the console turns into an explicit "Apply changes",
+   * so the operator chooses the moment their instances get replaced.
+   */
+  const drifted =
+    current.provision_state === 'provisioned' || current.provision_state === 'drifted';
+
   const pool = await getPool();
   const { rows } = await pool.query(
     `UPDATE compute_clusters
@@ -420,6 +549,7 @@ export async function updateCluster(input: {
             gpus_per_instance = $9,
             gpu_vram_mb = $10,
             gpu_mode = $11,
+            provision_state = CASE WHEN $12::boolean THEN 'drifted' ELSE provision_state END,
             updated_at = NOW()
       WHERE name = $1
       RETURNING ${COLUMNS}`,
@@ -435,6 +565,7 @@ export async function updateCluster(input: {
       settings.gpus_per_instance,
       settings.gpu_vram_mb,
       settings.gpu_mode,
+      drifted,
     ]
   );
 
@@ -449,8 +580,23 @@ export async function updateCluster(input: {
  * name the services rather than surfacing a constraint violation.
  */
 export async function removeCluster(input: { name: string; actor: string }) {
-  await requireCluster(input.name);
+  const current = await requireCluster(input.name);
   const pool = await getPool();
+
+  // Deleting the row while AWS resources exist would strand a scaling group
+  // launching instances for a cluster nothing remembers — billing forever, and
+  // invisible to the console that created it. Deprovision is the way out, and
+  // it is a separate deliberate action.
+  if (current.provision_state !== 'not_provisioned') {
+    throw new HttpError(
+      409,
+      'cluster_provisioned',
+      `"${input.name}" still has AWS resources — an ECS cluster` +
+        (current.asg_name ? ', an Auto Scaling group and a capacity provider' : '') +
+        '. Deprovision it first, or deleting this row would leave them running with ' +
+        'nothing tracking them.'
+    );
+  }
 
   const { rows: dependents } = await pool.query(
     `SELECT name FROM microservice_clusters WHERE cluster_name = $1 ORDER BY name`,
@@ -512,7 +658,7 @@ export async function assertVramFits(input: {
     throw new HttpError(
       409,
       'gpu_vram_overcommitted',
-      `The services on "${input.clusterName}" would need ${total} MiB of video memory, and ` +
+      `The services on this cluster would need ${total} MiB of video memory, and ` +
         `each ${cluster.instance_type ?? 'instance'} card has ${cluster.gpu_vram_mb} MiB. ` +
         'ECS schedules on CPU and memory only, so it would place them all and then one would ' +
         'fail with a CUDA out-of-memory. Lower the requirement, move a service off this ' +

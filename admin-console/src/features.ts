@@ -166,14 +166,19 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
       {
         name: 'clusters',
         path: 'clusters',
-        label: 'Clusters',
-        title: 'Compute clusters',
+        // Capacity rather than Clusters: a cluster here is never a thing of its
+        // own. One is created with each microservice, carries only that service,
+        // and is destroyed with it — so what this page actually lists is the
+        // hardware behind each service, and naming it after the ECS object
+        // invited people to look for clusters to create, share and assign.
+        label: 'Capacity',
+        title: 'Compute capacity',
         // Classic Material Icons only — see the note on the Services icon
         // below for why a Symbols-only name wrecks the sidebar row.
         icon: 'storage',
         minRole: 'operator',
         subtitle:
-          'Where microservice containers run: Fargate, or a pool of EC2 instances. Only EC2 can have GPUs.',
+          'The machines behind each microservice: Fargate, or a pool of EC2 instances. Only EC2 can have GPUs.',
         status: 'ready',
         component: () => import('@/pages/ClustersPage.vue'),
       },
@@ -218,6 +223,21 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
   {
     label: 'Administration',
     features: [
+      {
+        name: 'settings',
+        path: 'settings',
+        label: 'Settings',
+        title: 'Settings',
+        icon: 'settings',
+        // Operator, not admin: the floor is per entry, and an operator can read
+        // the GitHub connection and the cost tag even though only an admin can
+        // change them.
+        minRole: 'operator',
+        subtitle:
+          'Things this deployment is configured with, rather than things it runs.',
+        status: 'ready',
+        component: () => import('@/pages/SettingsPage.vue'),
+      },
       {
         name: 'users',
         path: 'users',

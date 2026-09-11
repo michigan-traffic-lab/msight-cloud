@@ -27,6 +27,7 @@ export type GithubOp =
   | 'get_installation'
   | 'list_installation_repos'
   | 'inspect_build'
+  | 'clone_token'
   | 'delete_installation';
 
 /**
@@ -71,6 +72,30 @@ export interface InspectBuildRequest {
   build_context: string;
 }
 
+/**
+ * Mints a token CodeBuild can clone with.
+ *
+ * The one op whose result is a live credential, and the reason the build
+ * pipeline needs no GitHub account of its own: an installation token is scoped
+ * to exactly the repositories that installation grants, carries only the App's
+ * permissions (here, `contents: read`), and expires in an hour whatever
+ * happens. A build that outlives it fails on a fetch rather than holding
+ * standing access.
+ *
+ * `repository` narrows it further where GitHub allows — a token issued for one
+ * repository cannot read the installation's others, so a compromised build
+ * container cannot walk sideways through the account.
+ *
+ * Never logged, never stored, never returned to a browser. It goes from here
+ * into one StartBuild call's environment and nowhere else.
+ */
+export interface CloneTokenRequest {
+  op: 'clone_token';
+  installation_id: number;
+  /** `owner/repo`. Scopes the token to this repository alone. */
+  repository: string;
+}
+
 export interface DeleteInstallationRequest {
   op: 'delete_installation';
   installation_id: number;
@@ -82,6 +107,7 @@ export type GithubRpcRequest =
   | GetInstallationRequest
   | ListInstallationReposRequest
   | InspectBuildRequest
+  | CloneTokenRequest
   | DeleteInstallationRequest;
 
 /**
@@ -157,12 +183,25 @@ export interface InspectBuildResult {
   build_context: 'root' | 'directory' | 'missing' | 'not_a_directory';
 }
 
+/**
+ * A live clone credential and when it dies.
+ *
+ * `expires_at` is returned so the caller can refuse to start a build it cannot
+ * finish, rather than discovering the expiry as a mid-build fetch failure that
+ * reads like a network fault.
+ */
+export interface CloneToken {
+  token: string;
+  expires_at: string;
+}
+
 export type GithubRpcData =
   | ManifestConversion
   | GithubAppIdentity
   | GithubInstallationInfo
   | { repositories: GithubRepoInfo[]; truncated: boolean }
   | InspectBuildResult
+  | CloneToken
   | { deleted: boolean };
 
 /**
