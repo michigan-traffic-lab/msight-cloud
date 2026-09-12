@@ -2879,14 +2879,17 @@ export class MsightCloudStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
       bundling: { minify: true, sourceMap: false, target: 'node22' },
       environment: {
-        // The in-VPC function is invoked directly rather than called over the
-        // API: an MCP caller holds a token, not a Cognito JWT, so there is
-        // nothing the admin API's own authorizer would accept.
+        // Both admin functions are invoked directly. MCP callers hold an MCP
+        // token, not a Cognito JWT, so the HTTP API's authorizer would refuse
+        // them. Routes in VPC_ROUTE_PREFIXES go to the in-VPC function; cost,
+        // logs, users, network, and system go to the out-of-VPC function.
         ADMIN_VPC_API_FUNCTION_NAME: adminVpcApiLambda.functionName,
+        ADMIN_API_FUNCTION_NAME: adminApiLambda.functionName,
       },
     });
 
     adminVpcApiLambda.grantInvoke(mcpApiLambda);
+    adminApiLambda.grantInvoke(mcpApiLambda);
 
     /**
      * The MCP route authorises on `X-Msight-Token`, not `Authorization`.
