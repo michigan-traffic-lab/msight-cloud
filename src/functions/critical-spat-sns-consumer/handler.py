@@ -23,6 +23,7 @@ import redis
 from pyv2xlib.SPATDecoder import spat_decoder
 
 from msight_config_cache import ConfigCache
+from msight_valkey_cache import ValkeyConfigCache
 
 # ---- logging -------------------------------------------------------------
 # SPaT arrives at roughly 10 Hz per sensor, so a log line per message dominated
@@ -31,6 +32,10 @@ from msight_config_cache import ConfigCache
 # on always print. Set DEBUG_LOGGING=true on the function to get the detail back
 # for an investigation.
 DEBUG_LOGGING = os.environ.get("DEBUG_LOGGING", "false").lower() == "true"
+
+# Namespaces this function's Valkey keys. Set by the stack; defaulted so the
+# module still imports under a test harness that sets no environment.
+SERVICE_NAME  = os.environ.get("SERVICE_NAME", "critical-spat-sns-consumer")
 
 
 def _debug(payload: dict) -> None:
@@ -89,10 +94,21 @@ def _reset_db_conn() -> None:
 
 
 def _get_db_conn():
-    """Return the container's connection, dialling one if it has none.
+    """Dial Aurora for one query. The caller closes it again immediately.
+
+    Nothing is pooled here any more, and that is the point. A container used to
+    keep this connection for its whole life; with configuration served from
+    Valkey it now runs approximately zero queries, so the connection was open
+    for minutes to carry nothing. Multiplied by the warm fleet that reached
+    ~198 connections against a ceiling near 112 — which is what the RDS Proxy
+    was paid $87 a month to absorb.
+
+    Dialling per query costs a TLS handshake on a path that now runs about once
+    per TTL for the entire fleet. The credentials are already cached in this
+    module, so there is no Secrets Manager call behind it.
 
     Deliberately does NOT probe the connection first. The probe this replaces
-    ran "SELECT 1" on every single call, which on a path that queries per
+    ran "SELECT 1" on every single call, which on a path that queried per
     message meant half of all queries reaching Aurora existed only to ask
     whether the connection still worked. Callers retry through
     _run_config_query() instead, so a dead connection costs one failed query
@@ -291,8 +307,37 @@ CONFIG_JITTER = float(os.environ.get("CONFIG_CACHE_JITTER", "0.25"))
 # The app list is one value, so it lives under a fixed key.
 _APPS_KEY = "critical_spat_app_ids"
 
+# Tier 1: this container's own memory. Microseconds, no network, and the
+# reason the steady state costs nothing at all.
 _apps_cache    = ConfigCache(ttl_s=CONFIG_TTL_S, jitter=CONFIG_JITTER)
 _centers_cache = ConfigCache(ttl_s=CONFIG_TTL_S, jitter=CONFIG_JITTER)
+
+# Tier 2: Valkey, shared by every container of this function.
+#
+# What tier 1 cannot do is help a container that has just started, and Lambda
+# keeps enough of those coming that the fleet still reached Aurora once per TTL
+# per container — each holding a connection open for its whole life to ask one
+# question a minute. This turns that into roughly one question per TTL for the
+# entire fleet, which is what makes the connection count small enough to drop
+# the RDS Proxy in front of Aurora.
+#
+# Named after SERVICE_NAME so the two SPaT consumers cannot read each other's
+# answers: they query the same two tables through different filters, and a
+# shared key would quietly hand each the other's app list.
+_shared_cache = ValkeyConfigCache(
+    SERVICE_NAME,
+    _get_redis,
+    ttl_s=CONFIG_TTL_S,
+    on_error=lambda operation, error: print(json.dumps({
+        "event": "shared_cache_degraded",
+        "operation": operation,
+        "error": str(error),
+    })),
+)
+
+#: Cache names. These become `MSight:<SERVICE_NAME>:<name>` in Valkey.
+_APPS_CACHE    = "app_ids"
+_CENTERS_CACHE = "map_centers"
 
 # One statement, both results. The ::text[] cast is what makes an empty name
 # list work: Postgres cannot infer the element type of an empty array literal.
@@ -321,13 +366,22 @@ def _run_config_query(names: list[str]) -> tuple:
                 cur.execute(_CONFIG_SQL, {"names": names})
                 return cur.fetchone()
         except psycopg2.Error as error:
-            # A pooled connection can be closed underneath us by the RDS Proxy
-            # or by a failover. Reconnecting and retrying once here is what
-            # lets _get_db_conn() drop its liveness probe: the old code ran
-            # "SELECT 1" before every query, doubling the query count on the
-            # busiest path in the system to detect a rare condition that the
-            # real query reports anyway.
+            # A connection can be closed underneath us by a failover. Retrying
+            # once here is what lets _get_db_conn() drop its liveness probe:
+            # the old code ran "SELECT 1" before every query, doubling the
+            # query count on the busiest path in the system to detect a rare
+            # condition that the real query reports anyway.
             last_error = error
+        finally:
+            # Closed on the way out, whether the query worked or not.
+            #
+            # This is what makes the connection count independent of how many
+            # containers are warm, and therefore what makes running without an
+            # RDS Proxy safe: a container holds a connection for the length of
+            # one query rather than for the length of its life. It also means a
+            # Valkey outage — which sends every container back here — costs a
+            # burst of brief connections instead of a permanent ~198 against a
+            # ceiling near 112.
             _reset_db_conn()
 
     raise last_error if last_error else RuntimeError("config query failed")
@@ -336,49 +390,116 @@ def _run_config_query(names: list[str]) -> tuple:
 def _load_config(intersection_names: list[str]) -> tuple[list, dict]:
     """Return (app_ids, {intersection_name: (lat, lon) | None}) for a message.
 
-    Costs no round trips while the cache is warm and exactly one when anything
-    in it has reached its refresh point.
+    Three tiers, cheapest first:
+
+      1. This container's memory. Costs nothing and answers almost always.
+      2. Valkey, shared by every container of this function. Costs one round
+         trip on a local network and answers whenever any container has asked
+         recently — which is what a freshly started container needs, and what
+         the per-container tier can never provide.
+      3. Aurora. One statement, and only for what neither tier above holds.
+
+    The point of tier 2 is the connection count, not the latency. Every warm
+    container used to reach Aurora once per TTL and hold a connection open for
+    its whole life to do it; the fleet peaked near 200 connections against a
+    ceiling of about 112 at the 0.5 ACU floor. With tier 2 in front, exactly one
+    container per TTL goes to the database for the whole fleet.
     """
     apps_fresh, cached_app_ids = _apps_cache.fresh(_APPS_KEY)
     app_ids = list(cached_app_ids or []) if apps_fresh else []
     missing = _centers_cache.missing(intersection_names)
 
     if not apps_fresh or missing:
-        try:
-            row = _run_config_query(missing)
+        # ---- tier 2: what the fleet already knows ------------------------
+        #
+        # A stale value is used rather than discarded, and only the container
+        # that wins `claim_refresh` goes on to the database. Without that,
+        # every container would miss in the same instant the shared key aged
+        # out — the stampede a shared cache creates and a per-container one
+        # cannot.
+        must_query_apps = not apps_fresh
+        if must_query_apps:
+            state, shared_app_ids = _shared_cache.read_one(_APPS_CACHE)
+            if state == "fresh":
+                app_ids = list(shared_app_ids or [])
+                _apps_cache.put(_APPS_KEY, app_ids)
+                must_query_apps = False
+            elif state == "stale":
+                app_ids = list(shared_app_ids or [])
+                _apps_cache.put(_APPS_KEY, app_ids)
+                # Serve it now; reload only if this container is the one
+                # elected to do so.
+                must_query_apps = _shared_cache.claim_refresh(_APPS_CACHE)
 
-            # The app list rides along on every query whether or not it was the
-            # reason for one. It is free — same statement, same round trip, a
-            # one-row table — and refreshing it here means a container busy
-            # enough to keep meeting new intersections almost never has to go
-            # to the database for the app list on its own account.
-            app_ids = list(row[0] or [])
-            _apps_cache.put(_APPS_KEY, app_ids)
+        still_missing = missing
+        if missing:
+            fresh_centers, stale_centers, absent = _shared_cache.read_many(
+                _CENTERS_CACHE, missing
+            )
+            for name, value in fresh_centers.items():
+                _centers_cache.put(name, value)
+            for name, value in stale_centers.items():
+                _centers_cache.put(name, value)
 
-            found = {
-                entry["name"]: (entry["lat"], entry["lon"])
-                for entry in (row[1] or [])
-            }
-            # Misses are cached as None too. An unknown intersection name
-            # arrives on every message from that sensor, and querying for a row
-            # that does not exist costs exactly as much as one that does.
-            _centers_cache.put_many({name: found.get(name) for name in missing})
+            # Anything genuinely unknown must be queried. A stale centre is
+            # worth refreshing too, but not at the cost of a query per
+            # container — so it joins the statement only for the winner.
+            still_missing = list(absent)
+            if stale_centers and not still_missing:
+                if _shared_cache.claim_refresh(_CENTERS_CACHE):
+                    still_missing = list(stale_centers.keys())
+            elif stale_centers:
+                still_missing.extend(stale_centers.keys())
 
-        except Exception as error:
-            print(json.dumps({
-                "event": "config_query_failed",
-                "error": str(error),
-                "missing_centers": missing,
-                "had_fresh_app_ids": apps_fresh,
-            }))
-            if not apps_fresh:
-                # Prefer briefly stale configuration over dropping live SPaT.
-                # ConfigCache bounds how long that can go on; once the grace is
-                # spent there is nothing to serve and the message is skipped.
-                stale_ok, stale_app_ids = _apps_cache.stale(_APPS_KEY)
-                if not stale_ok:
-                    raise
-                app_ids = list(stale_app_ids or [])
+        # ---- tier 3: the database ----------------------------------------
+        if must_query_apps or still_missing:
+            try:
+                row = _run_config_query(still_missing)
+
+                # The app list rides along on every query whether or not it was
+                # the reason for one. It is free — same statement, same round
+                # trip, a one-row table — and refreshing it here means a
+                # container busy enough to keep meeting new intersections
+                # almost never has to go to the database for the app list on
+                # its own account.
+                app_ids = list(row[0] or [])
+                _apps_cache.put(_APPS_KEY, app_ids)
+                _shared_cache.write_one(_APPS_CACHE, app_ids)
+
+                found = {
+                    entry["name"]: (entry["lat"], entry["lon"])
+                    for entry in (row[1] or [])
+                }
+                # Misses are cached as None too. An unknown intersection name
+                # arrives on every message from that sensor, and querying for a
+                # row that does not exist costs exactly as much as one that
+                # does.
+                resolved = {name: found.get(name) for name in still_missing}
+                _centers_cache.put_many(resolved)
+                _shared_cache.write_many(_CENTERS_CACHE, resolved)
+
+            except Exception as error:
+                print(json.dumps({
+                    "event": "config_query_failed",
+                    "error": str(error),
+                    "missing_centers": still_missing,
+                    "had_fresh_app_ids": apps_fresh,
+                }))
+                # Let the next container try immediately rather than waiting
+                # out the claim: a failed reload should not also freeze the
+                # value for everybody else.
+                _shared_cache.release_refresh(_APPS_CACHE)
+                _shared_cache.release_refresh(_CENTERS_CACHE)
+
+                if not app_ids:
+                    # Prefer briefly stale configuration over dropping live
+                    # SPaT. ConfigCache bounds how long that can go on; once
+                    # the grace is spent there is nothing to serve and the
+                    # message is skipped.
+                    stale_ok, stale_app_ids = _apps_cache.stale(_APPS_KEY)
+                    if not stale_ok:
+                        raise
+                    app_ids = list(stale_app_ids or [])
 
     centers: dict = {}
     for name in intersection_names:

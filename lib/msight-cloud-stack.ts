@@ -250,10 +250,6 @@ export class MsightCloudStack extends cdk.Stack {
       hasPreferredAz
         ? { subnetGroupName: 'app', availabilityZones: [preferredAz] }
         : { subnetGroupName: 'app' };
-    const multiAzAppSubnetSelection: ec2.SubnetSelection = {
-      subnetType: appSubnetType,
-    };
-
     // -------------------------
     // VPC
     // -------------------------
@@ -296,13 +292,6 @@ export class MsightCloudStack extends cdk.Stack {
       securityGroupName: 'msight-lambda-sg',
     });
 
-    const proxySg = new ec2.SecurityGroup(this, 'MsightProxySg', {
-      vpc,
-      allowAllOutbound: true,
-      description: 'MSight RDS Proxy Security Group',
-      securityGroupName: 'msight-proxy-sg',
-    });
-
     const dbSg = new ec2.SecurityGroup(this, 'MsightDbSg', {
       vpc,
       allowAllOutbound: true,
@@ -324,14 +313,25 @@ export class MsightCloudStack extends cdk.Stack {
       securityGroupName: 'msight-vpce-sg',
     });
 
-    // Lambda -> Proxy
-    proxySg.addIngressRule(lambdaSg, ec2.Port.tcp(5432), 'Lambda to Proxy');
-
     // Lambda -> ElastiCache
     cacheSg.addIngressRule(lambdaSg, ec2.Port.tcp(6379), 'Lambda to ElastiCache');
 
-    // Proxy -> DB
-    dbSg.addIngressRule(proxySg, ec2.Port.tcp(5432), 'Proxy to Aurora');
+    /**
+     * Lambda -> Aurora, directly.
+     *
+     * This used to go through an RDS Proxy, and the reason it no longer needs
+     * to is that nothing holds a connection any more. The SPaT consumers read
+     * their configuration from Valkey and reach Aurora about once per TTL for
+     * the whole fleet, closing the connection on the way out — so the
+     * connection count is a property of the query rate rather than of how many
+     * containers Lambda happens to be keeping warm.
+     *
+     * That distinction is what the proxy was absorbing. Holding one connection
+     * per warm container put ~198 against a ceiling near 112 at the 0.5 ACU
+     * floor; the proxy multiplexed them down to about six, and charged a flat
+     * 8-ACU minimum — $87 a month, more than the database itself — to do it.
+     */
+    dbSg.addIngressRule(lambdaSg, ec2.Port.tcp(5432), 'Lambda to Aurora');
 
     // Lambda -> Interface VPC Endpoints
     vpcEndpointSg.addIngressRule(
@@ -415,18 +415,13 @@ export class MsightCloudStack extends cdk.Stack {
       deletionProtection: false,
     });
 
-    // -------------------------
-    // RDS Proxy
-    // -------------------------
-    const proxy = new rds.DatabaseProxy(this, 'MsightProxy', {
-      proxyTarget: rds.ProxyTarget.fromCluster(cluster),
-      secrets: [cluster.secret!],
-      vpc,
-      securityGroups: [proxySg],
-      requireTLS: true,
-      dbProxyName: 'msight-proxy',
-      vpcSubnets: multiAzAppSubnetSelection,
-    });
+    /**
+     * The writer endpoint every client now dials.
+     *
+     * Named once so the dozen environments below cannot drift apart, and so
+     * what replaced the proxy is obvious at the point of use.
+     */
+    const dbEndpoint = cluster.clusterEndpoint.hostname;
 
     // Keep Secrets Manager calls on private AWS network when NAT is disabled.
     new ec2.InterfaceVpcEndpoint(this, 'SecretsManagerVpcEndpoint', {
@@ -658,7 +653,7 @@ export class MsightCloudStack extends cdk.Stack {
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
         CACHE_TLS_ENABLED: 'true',
-        DB_HOST: proxy.endpoint,
+        DB_HOST: dbEndpoint,
         DB_PORT: '5432',
         DB_NAME: 'msight',
         DB_SECRET_ARN: cluster.secret!.secretArn,
@@ -684,7 +679,7 @@ export class MsightCloudStack extends cdk.Stack {
         SERVICE_NAME: 'maps-api',
         DEBUG_LOGGING: 'false',
         BUILD_ID: buildId,
-        DB_HOST: proxy.endpoint,
+        DB_HOST: dbEndpoint,
         DB_PORT: '5432',
         DB_NAME: 'msight',
         DB_SECRET_ARN: cluster.secret!.secretArn,
@@ -972,8 +967,11 @@ export class MsightCloudStack extends cdk.Stack {
       value: wsApiUrl,
     });
 
-    new cdk.CfnOutput(this, 'DbProxyEndpoint', {
-      value: proxy.endpoint,
+    // Renamed as well as repointed: anything reading DbProxyEndpoint is
+    // reading about a resource that no longer exists, and should fail loudly
+    // rather than quietly receive a writer endpoint it did not ask for.
+    new cdk.CfnOutput(this, 'DbWriterEndpoint', {
+      value: dbEndpoint,
     });
 
     new cdk.CfnOutput(this, 'DbSecretArn', {
@@ -1214,7 +1212,7 @@ export class MsightCloudStack extends cdk.Stack {
         // SENSOR_NAME and QUEUE_URL are absent on purpose: the reconciler fills
         // them in per sensor when it registers a revision of this definition.
         BUILD_ID: buildId,
-        DB_HOST: proxy.endpoint,
+        DB_HOST: dbEndpoint,
         DB_PORT: '5432',
         DB_NAME: 'msight',
         DB_SECRET_ARN: cluster.secret!.secretArn,
@@ -1271,7 +1269,7 @@ export class MsightCloudStack extends cdk.Stack {
         BUILD_ID: buildId,
         RADIUS_BROADCAST_LAMBDA_NAME: radiusBroadcastLambda.functionName,
         SPAT_BROADCAST_RADIUS_M: String(spatBroadcastRadiusM),
-        DB_HOST: proxy.endpoint,
+        DB_HOST: dbEndpoint,
         DB_PORT: '5432',
         DB_NAME: 'msight',
         DB_SECRET_ARN: cluster.secret!.secretArn,
@@ -1315,7 +1313,7 @@ export class MsightCloudStack extends cdk.Stack {
         BUILD_ID: buildId,
         RADIUS_BROADCAST_LAMBDA_NAME: radiusBroadcastLambda.functionName,
         SPAT_BROADCAST_RADIUS_M: String(spatBroadcastRadiusM),
-        DB_HOST: proxy.endpoint,
+        DB_HOST: dbEndpoint,
         DB_PORT: '5432',
         DB_NAME: 'msight',
         DB_SECRET_ARN: cluster.secret!.secretArn,
@@ -1694,7 +1692,7 @@ export class MsightCloudStack extends cdk.Stack {
      *
      * Mirrors `SensorConsumerTaskRole` deliberately: a microservice is an
      * algorithm over the same deployment, so it needs the same things — the
-     * database behind the proxy, the cache, the sensor queues it consumes, the
+     * database, the cache, the sensor queues it consumes, and the
      * topics it publishes results to. A narrower role would mean every
      * microservice's first act is to ask an admin for permissions.
      */
@@ -1959,7 +1957,7 @@ export class MsightCloudStack extends cdk.Stack {
         CACHE_HOST: cacheReplicationGroup.attrPrimaryEndPointAddress,
         CACHE_PORT: cacheReplicationGroup.attrPrimaryEndPointPort,
         CACHE_TLS_ENABLED: 'true',
-        DB_HOST: proxy.endpoint,
+        DB_HOST: dbEndpoint,
         DB_PORT: '5432',
         DB_NAME: 'msight',
         DB_SECRET_ARN: cluster.secret!.secretArn,
@@ -2023,9 +2021,8 @@ export class MsightCloudStack extends cdk.Stack {
         MICROSERVICE_BUILD_ROLE_ARN: microserviceBuildRole.roleArn,
         MICROSERVICE_INSTANCE_PROFILE_ARN: microserviceInstanceProfile.attrArn,
         // Tasks and container instances land in the same subnets and security
-        // group as everything else, which is what gives them a route to the
-        // RDS proxy, Valkey, and — through the NAT gateway — ECR and the
-        // internet.
+        // group as everything else, which is what gives them a route to Aurora,
+        // Valkey, and — through the NAT gateway — ECR and the internet.
         MICROSERVICE_SUBNET_IDS: vpc.selectSubnets(appSubnetSelection).subnetIds.join(','),
         MICROSERVICE_SECURITY_GROUP_IDS: lambdaSg.securityGroupId,
         /**
@@ -2039,7 +2036,7 @@ export class MsightCloudStack extends cdk.Stack {
         MICROSERVICE_TASK_ENV: JSON.stringify({
           BUILD_ID: buildId,
           AWS_REGION: cdk.Stack.of(this).region,
-          DB_HOST: proxy.endpoint,
+          DB_HOST: dbEndpoint,
           DB_PORT: '5432',
           DB_NAME: 'msight',
           DB_SECRET_ARN: cluster.secret!.secretArn,
