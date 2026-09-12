@@ -4,6 +4,7 @@
 !test-client.js
 !cache_debug.js
 !insert-map.js
+!deploy.js
 *.d.ts
 node_modules
 
