@@ -2252,11 +2252,10 @@ export class MsightCloudStack extends cdk.Stack {
     );
     adminVpcApiLambda.addToRolePolicy(
       new iam.PolicyStatement({
-        // BatchGetBuilds takes build ids, not project ARNs, and IAM defines no
-        // resource type for a build — so this cannot be narrowed. Reaching a
-        // build id still requires having started it through the project rights
-        // above.
-        actions: ['codebuild:BatchGetBuilds'],
+        // BatchGetBuilds and ListBuildsForProject take build ids, not project
+        // ARNs, and IAM defines no resource type for a build. Reaching a build
+        // id still requires having started it through the project rights above.
+        actions: ['codebuild:BatchGetBuilds', 'codebuild:ListBuildsForProject'],
         resources: ['*'],
       })
     );
@@ -2413,6 +2412,11 @@ export class MsightCloudStack extends cdk.Stack {
           'cloudwatch:PutMetricAlarm',
           'cloudwatch:DeleteAlarms',
           'cloudwatch:DescribeAlarms',
+          // Alarm suppression and metrics for the monitoring APIs.
+          'cloudwatch:DisableAlarmActions',
+          'cloudwatch:EnableAlarmActions',
+          'cloudwatch:GetMetricData',
+          'cloudwatch:ListMetrics',
         ],
         resources: ['*'],
       })
@@ -2784,6 +2788,38 @@ export class MsightCloudStack extends cdk.Stack {
       // Same reasoning as the in-VPC integration above: one permission for the
       // whole API rather than one per method on the catch-all.
       integration: new HttpLambdaIntegration('AdminApiIntegration', adminApiLambda, {
+        scopePermissionToRoute: false,
+      }),
+    });
+
+    // -------------------------
+    // MCP API Lambda
+    //
+    // Implements the Model Context Protocol (Streamable HTTP, 2024-11-05).
+    // No VPC: it proxies to the public adminApi endpoint and needs no database.
+    // The defaultAuthorizer on adminApi covers this route automatically.
+    // -------------------------
+    const mcpApiLambda = new NodejsFunction(this, 'McpApiLambda', {
+      logGroup: new logs.LogGroup(this, 'McpApiLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/mcp-api`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: path.join(__dirname, '../src/functions/mcp-api/handler.ts'),
+      handler: 'handler',
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(30),
+      bundling: { minify: true, sourceMap: false, target: 'node22' },
+      environment: {
+        ADMIN_API_URL: adminApi.apiEndpoint,
+      },
+    });
+
+    adminApi.addRoutes({
+      path: '/mcp',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new HttpLambdaIntegration('McpApiIntegration', mcpApiLambda, {
         scopePermissionToRoute: false,
       }),
     });

@@ -22,6 +22,8 @@ import {
   ensureService,
   ensureServiceScaling,
   imageSummary,
+  listEcrImages,
+  listProjectBuilds,
   logGroupSummary,
   registerServiceTaskDefinition,
   restartService,
@@ -1749,6 +1751,156 @@ export async function reconcileLaunches(): Promise<LaunchReconcileResult> {
   }
 
   return { launches };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Image history and rollback
+// ───────────────────────────────────────────────────────────────────────────
+
+/** All ECR images for a microservice, newest push first. */
+export async function listMicroserviceImages(name: string) {
+  const row = await requireMicroservice(name);
+  const images = row.ecr_repository_name ? await listEcrImages(row.ecr_repository_name) : [];
+  return { images, current_tag: row.image_tag };
+}
+
+/** Recent CodeBuild history for a microservice, newest first. */
+export async function listMicroserviceBuilds(name: string, limit: number) {
+  const row = await requireMicroservice(name);
+  const builds = row.build_project_name
+    ? await listProjectBuilds(row.build_project_name, limit)
+    : [];
+  return { builds };
+}
+
+/**
+ * Deploys a previously-built image tag, bypassing the build-state check.
+ *
+ * Identical to `deployMicroservice` except it accepts an explicit image tag
+ * rather than using `row.image_tag`, and it does not require the last build
+ * to have succeeded — the image already exists in ECR.
+ */
+export async function rollbackMicroservice(input: {
+  name: string;
+  image_tag: string;
+  actor: string;
+}): Promise<ProvisionResult> {
+  const row = await requireMicroservice(input.name);
+  const config = infraConfig();
+  const pool = await getPool();
+
+  if (!row.cluster_name) {
+    throw new HttpError(409, 'no_cluster', `"${input.name}" has no cluster to run on.`);
+  }
+  if (!row.ecr_repository_name || !row.ecr_repository_uri) {
+    throw new HttpError(
+      409,
+      'not_provisioned',
+      `"${input.name}" has no ECR repository. Provision it first.`
+    );
+  }
+
+  const cluster = await requireCluster(row.cluster_name);
+  if (cluster.provision_state === 'not_provisioned') {
+    throw new HttpError(
+      409,
+      'cluster_not_provisioned',
+      `The cluster for "${input.name}" is not provisioned.`
+    );
+  }
+
+  const image = await imageSummary(row.ecr_repository_name, input.image_tag);
+  if (!image) {
+    throw new HttpError(
+      404,
+      'image_not_found',
+      `Image tag "${input.image_tag}" does not exist in the repository for "${input.name}". ` +
+        'Use GET /microservices/:name/images to list available tags.'
+    );
+  }
+
+  assertTaskFitsInstance({ ...row, image_tag: input.image_tag }, cluster);
+
+  const spec: ServiceSpec = {
+    name: row.name,
+    cluster: clusterSpecOf(cluster),
+    imageUri: row.ecr_repository_uri,
+    imageTag: input.image_tag,
+    cpu: row.cpu,
+    memory: row.memory,
+    containerPort: row.container_port,
+    desiredCount: row.desired_count,
+    scalingMode: row.scaling_mode,
+    minTasks: row.min_tasks,
+    maxTasks: row.max_tasks,
+    scalingMetric: row.scaling_metric,
+    scalingTarget: row.scaling_target,
+    scaleOutCooldown: row.scale_out_cooldown,
+    scaleInCooldown: row.scale_in_cooldown,
+    gpuMode: cluster.gpu_mode,
+    logGroup: row.log_group_name ?? logGroupsFor(config, row.name).container,
+  };
+
+  const ecsClusterName = ecsClusterNameFor(config, cluster.name);
+  const results: InfraResult[] = [];
+  let taskDefinitionArn: string | null = row.task_definition_arn;
+  let serviceArn: string | null = row.service_arn;
+
+  try {
+    const registered = await registerServiceTaskDefinition(config, spec);
+    taskDefinitionArn = registered.taskDefinitionArn;
+    results.push({ steps: [`task definition registered for rollback to ${input.image_tag}`], error: null });
+
+    const created = await ensureService(config, spec, ecsClusterName, taskDefinitionArn);
+    results.push(created);
+    serviceArn = created.serviceArn ?? serviceArn;
+
+    if (!created.error) {
+      results.push(await ensureServiceScaling(config, spec, ecsClusterName));
+    }
+  } catch (error) {
+    results.push({ steps: [], error: error instanceof Error ? error.message : String(error) });
+  }
+
+  const combined = combine(results);
+  const state = combined.error ? 'failed' : 'provisioned';
+
+  await pool.query(
+    `UPDATE microservice_clusters
+        SET provision_state = $2,
+            image_tag = $3,
+            image_digest = $4,
+            task_definition_arn = COALESCE($5, task_definition_arn),
+            service_arn = COALESCE($6, service_arn),
+            provision_detail = $7,
+            provisioned_at = CASE WHEN $2 = 'provisioned' THEN NOW() ELSE provisioned_at END,
+            updated_at = NOW()
+      WHERE name = $1`,
+    [
+      input.name,
+      state,
+      input.image_tag,
+      image.digest,
+      taskDefinitionArn,
+      serviceArn,
+      combined.error ?? combined.steps.join('; ').slice(0, 2000),
+    ]
+  );
+
+  console.log(
+    JSON.stringify({
+      event: 'microservice_rolled_back',
+      actor: input.actor,
+      microservice: input.name,
+      cluster: cluster.name,
+      image_tag: input.image_tag,
+      state,
+      steps: combined.steps,
+      error: combined.error,
+    })
+  );
+
+  return { name: input.name, provision_state: state, ...combined };
 }
 
 // ───────────────────────────────────────────────────────────────────────────

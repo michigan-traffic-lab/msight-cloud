@@ -32,6 +32,7 @@
     "@aws-sdk/client-apigatewaymanagementapi": "^3.1014.0",
     "@aws-sdk/client-application-auto-scaling": "^3.1130.0",
     "@aws-sdk/client-auto-scaling": "^3.1130.0",
+    "@aws-sdk/client-cloudwatch": "^3.1131.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.1127.0",
     "@aws-sdk/client-codebuild": "^3.1130.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1117.0",

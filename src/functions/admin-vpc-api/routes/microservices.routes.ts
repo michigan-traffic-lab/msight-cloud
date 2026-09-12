@@ -17,10 +17,13 @@ import {
   deployMicroservice,
   deprovisionMicroservice,
   launchMicroservice,
+  listMicroserviceBuilds,
+  listMicroserviceImages,
   microserviceLogs,
   microserviceStatus,
   provisionMicroservice,
   restartMicroservice,
+  rollbackMicroservice,
   setLogRetention,
   stopMicroserviceBuild,
 } from '../services/provisioning';
@@ -469,6 +472,39 @@ export function microserviceRoutes(base: string): Router {
           scope: input.scope ?? 'both',
         })
       );
+    },
+    operator
+  );
+
+  router.get(
+    `${base}/microservices/:name/images`,
+    async (ctx) => ok(await listMicroserviceImages(ctx.params.name)),
+    operator
+  );
+
+  router.post(
+    `${base}/microservices/:name/rollback`,
+    async (ctx) => {
+      const input = parseWith(
+        z.object({ image_tag: z.string().min(1).max(256) }),
+        readJsonBody(ctx)
+      );
+      return ok(
+        await rollbackMicroservice({
+          name: ctx.params.name,
+          image_tag: input.image_tag,
+          actor: ctx.caller.username,
+        })
+      );
+    },
+    admin
+  );
+
+  router.get(
+    `${base}/microservices/:name/builds`,
+    async (ctx) => {
+      const limit = ctx.query.limit ? Math.min(Math.max(Number(ctx.query.limit) || 20, 1), 100) : 20;
+      return ok(await listMicroserviceBuilds(ctx.params.name, limit));
     },
     operator
   );

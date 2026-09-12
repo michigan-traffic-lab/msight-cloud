@@ -47,6 +47,7 @@ import {
   CodeBuildClient,
   CreateProjectCommand,
   DeleteProjectCommand,
+  ListBuildsForProjectCommand,
   StartBuildCommand,
   StopBuildCommand,
   UpdateProjectCommand,
@@ -734,6 +735,32 @@ export async function imageSummary(repositoryName: string, imageTag: string) {
   }
 }
 
+/** All tagged images in a repository, newest push first. */
+export async function listEcrImages(repositoryName: string) {
+  try {
+    const described = await ecr.send(
+      new DescribeImagesCommand({ repositoryName, filter: { tagStatus: 'TAGGED' } })
+    );
+    return (described.imageDetails ?? [])
+      .sort((a, b) => {
+        const at = a.imagePushedAt instanceof Date ? a.imagePushedAt.getTime() : 0;
+        const bt = b.imagePushedAt instanceof Date ? b.imagePushedAt.getTime() : 0;
+        return bt - at;
+      })
+      .map((image) => ({
+        digest: image.imageDigest ?? null,
+        tags: image.imageTags ?? [],
+        size_bytes: image.imageSizeInBytes ?? null,
+        pushed_at: image.imagePushedAt
+          ? new Date(image.imagePushedAt).toISOString()
+          : null,
+      }));
+  } catch (error) {
+    if (isNotFound(error)) return [];
+    throw error;
+  }
+}
+
 /** Whether a repository exists at all — the cheap "is this provisioned" probe. */
 export async function repositoryExists(repositoryName: string): Promise<boolean> {
   try {
@@ -1027,6 +1054,38 @@ export async function stopBuild(buildId: string): Promise<InfraResult> {
   } catch (error) {
     if (isNotFound(error)) return ok([]);
     return failed([], error);
+  }
+}
+
+/** Recent builds for a CodeBuild project, newest first. */
+export async function listProjectBuilds(projectName: string, limit = 20) {
+  try {
+    const listed = await codebuild.send(
+      new ListBuildsForProjectCommand({ projectName, sortOrder: 'DESCENDING' })
+    );
+    const ids = (listed.ids ?? []).slice(0, Math.min(limit, 100));
+    if (ids.length === 0) return [];
+
+    const details = await codebuild.send(new BatchGetBuildsCommand({ ids }));
+    return (details.builds ?? []).map((build) => ({
+      id: build.id ?? null,
+      build_number: build.buildNumber ?? null,
+      status: build.buildStatus ?? null,
+      start_time: build.startTime ? new Date(build.startTime).toISOString() : null,
+      end_time: build.endTime ? new Date(build.endTime).toISOString() : null,
+      duration_seconds:
+        build.startTime && build.endTime
+          ? Math.round((build.endTime.getTime() - build.startTime.getTime()) / 1000)
+          : null,
+      initiator: build.initiator ?? null,
+      source_version: build.sourceVersion ?? null,
+      commit_sha: build.resolvedSourceVersion ?? null,
+      log_group: build.logs?.groupName ?? null,
+      log_stream: build.logs?.streamName ?? null,
+    }));
+  } catch (error) {
+    if (isNotFound(error)) return [];
+    throw error;
   }
 }
 

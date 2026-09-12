@@ -1,10 +1,12 @@
 import { Router } from '../../../shared/admin-api/router';
+import { alarmRoutes } from './alarms.routes';
 import { appRoutes } from './apps.routes';
 import { auroraRoutes } from './aurora.routes';
 import { clientRoutes } from './clients.routes';
 import { clusterRoutes } from './clusters.routes';
 import { githubRoutes } from './github.routes';
 import { mapRoutes } from './maps.routes';
+import { metricsRoutes } from './metrics.routes';
 import { microserviceRoutes } from './microservices.routes';
 import { sensorRoutes } from './sensors.routes';
 import { storageRoutes } from './storage.routes';
@@ -40,5 +42,7 @@ export function buildVpcRouter(apiVersion: string): Router {
     .merge(appRoutes(base))
     .merge(storageRoutes(base))
     .merge(githubRoutes(base))
-    .merge(microserviceRoutes(base));
+    .merge(microserviceRoutes(base))
+    .merge(alarmRoutes(base))
+    .merge(metricsRoutes(base));
 }

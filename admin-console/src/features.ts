@@ -221,6 +221,22 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
     ],
   },
   {
+    label: 'AI',
+    features: [
+      {
+        name: 'mcp',
+        path: 'mcp',
+        label: 'MCP',
+        title: 'MCP Server',
+        icon: 'smart_toy',
+        minRole: 'viewer',
+        subtitle: 'Connect any AI assistant to manage your cloud using natural language.',
+        status: 'ready',
+        component: () => import('@/pages/McpPage.vue'),
+      },
+    ],
+  },
+  {
     label: 'Administration',
     features: [
       {
