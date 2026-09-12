@@ -125,6 +125,13 @@ export interface ManifestConversion {
   name: string | null;
   html_url: string | null;
   owner_login: string | null;
+  /**
+   * 'User' or 'Organization'. Carried because this response is the only
+   * description of the App available in the seconds after it is created —
+   * `GET /app` 404s until GitHub has published it — and the settings URL is
+   * built differently for the two.
+   */
+  owner_type: string | null;
   pem: string;
   webhook_secret: string | null;
   permissions: Record<string, string>;

@@ -3,7 +3,9 @@ import { computed, ref } from 'vue';
 import { useQuasar } from 'quasar';
 import { api, type ValkeyKey, type ValkeyOverview } from '@/api/client';
 import { useAsyncValue } from '@/composables/useAsyncValue';
+import AwsLink from '@/components/AwsLink.vue';
 import PageHeader from '@/components/PageHeader.vue';
+import { aws } from '@/aws-links';
 import AsyncValue from '@/components/AsyncValue.vue';
 import { useAuthStore } from '@/stores/auth';
 import StatCard from '@/components/StatCard.vue';
@@ -143,6 +145,14 @@ async function apply() {
       subtitle="Live values for the keys this stack writes, and single-key debugging operations. The keyspace is never scanned — every key shown here is constructed from a known pattern."
     >
       <template #actions>
+        <!--
+          Node metrics, events and the maintenance window are ElastiCache's
+          alone. Deliberately the service list rather than this cache's own
+          page: that path has been reorganised more than once around Valkey,
+          and a link that lands on an error is worse than one that lands a
+          click away.
+        -->
+        <AwsLink :href="aws.elastiCache()" button label="ElastiCache console" />
         <q-btn
           outline
           color="primary"

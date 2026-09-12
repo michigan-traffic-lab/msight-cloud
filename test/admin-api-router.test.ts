@@ -353,8 +353,23 @@ describe('in-VPC admin router', () => {
         'DELETE /v1/admin/microservices/:name',
         'GET /v1/admin/microservices/:name/status',
         'GET /v1/admin/microservices/:name/logs',
+        // Added by the monitoring work; the MCP server's tools call these.
+        'GET /v1/admin/microservices/:name/builds',
+        'GET /v1/admin/microservices/:name/images',
+        'GET /v1/admin/microservices/:name/metrics',
+        'POST /v1/admin/microservices/:name/rollback',
+        'GET /v1/admin/mcp-tokens',
+        'POST /v1/admin/mcp-tokens',
+        'DELETE /v1/admin/mcp-tokens/:name',
+        'GET /v1/admin/alarms',
+        'POST /v1/admin/alarms/:name/suppress',
+        'POST /v1/admin/alarms/:name/unsuppress',
         'POST /v1/admin/microservices/:name/launch',
         'POST /v1/admin/microservices/:name/launch/dismiss',
+        // How a verified push reaches the registry. Static, and so listed
+        // before the parameterised siblings it would otherwise be captured by.
+        'POST /v1/admin/microservices/github-push',
+        'GET /v1/admin/microservices/:name/events',
         'POST /v1/admin/microservices/:name/provision',
         'POST /v1/admin/microservices/:name/build',
         'POST /v1/admin/microservices/:name/build/stop',

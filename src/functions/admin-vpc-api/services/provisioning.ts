@@ -49,9 +49,15 @@ import {
   checkMicroservice,
   removeMicroservice,
   requireMicroservice,
+  type LaunchKind,
   type LaunchState,
+  type LaunchTrigger,
   type MicroserviceRow,
 } from './microservices';
+import {
+  recordEvent,
+  type MicroserviceEventTrigger,
+} from './microservice-events';
 import { cloneToken } from './github-client';
 
 /**
@@ -563,6 +569,8 @@ export async function provisionMicroservice(input: {
 export async function buildMicroservice(input: {
   name: string;
   actor: string;
+  /** Defaults to the console. Carried through only so the history can say. */
+  trigger?: LaunchTrigger | undefined;
 }): Promise<{ name: string; build_id: string; image_tag: string; build_state: string }> {
   const row = await requireMicroservice(input.name);
   const config = infraConfig();
@@ -636,6 +644,17 @@ export async function buildMicroservice(input: {
       WHERE name = $1`,
     [input.name, started.buildId, commitSha, imageTag]
   );
+
+  await recordEvent({
+    microservice: input.name,
+    kind: 'build_started',
+    actor: input.actor,
+    trigger: input.trigger ?? 'console',
+    detail: `Building ${row.repo_full_name}@${row.branch}.`,
+    commitSha,
+    imageTag,
+    buildId: started.buildId,
+  });
 
   console.log(
     JSON.stringify({
@@ -713,6 +732,38 @@ export async function refreshBuild(name: string): Promise<MicroserviceRow> {
   );
 
   if (rows.length === 0) return row;
+
+  /**
+   * This is the only place a build's outcome becomes known.
+   *
+   * CodeBuild has no completion callback wired up, so the transition out of
+   * 'building' happens here, when something asks — which makes this the one
+   * moment the result can be recorded. Recorded only on a transition, because
+   * the guard at the top of this function returns early for a build already in
+   * a terminal state, so a repeated poll cannot write the same outcome twice.
+   */
+  if (status.state === 'succeeded' || status.state === 'failed' || status.state === 'stopped') {
+    await recordEvent({
+      microservice: name,
+      kind: status.state === 'succeeded' ? 'build_succeeded' : 'build_failed',
+      // The build was attributed when it started; this is the outcome arriving,
+      // which belongs to nobody in particular.
+      actor: row.launch_requested_by ?? 'build',
+      trigger: row.launch_trigger === 'push' ? 'push' : 'console',
+      detail:
+        status.state === 'succeeded'
+          ? digest
+            ? `Image pushed as ${row.image_tag}.`
+            : // Worth flagging: a build can report SUCCEEDED having pushed
+              // nothing if its final phase was skipped.
+              `Build succeeded but no image digest was found for ${row.image_tag}.`
+          : (status.detail ?? `The build ${status.state}.`),
+      commitSha: status.commitSha ?? row.build_commit_sha,
+      imageTag: row.image_tag,
+      buildId: row.build_id,
+    });
+  }
+
   return requireMicroservice(name);
 }
 
@@ -936,6 +987,14 @@ export async function restartMicroservice(input: {
     input.name,
     ecsClusterNameFor(config, row.cluster_name)
   );
+
+  await recordEvent({
+    microservice: input.name,
+    kind: 'restarted',
+    actor: input.actor,
+    detail: result.error ?? 'Rolling restart of the running tasks.',
+    imageTag: row.image_tag,
+  });
 
   console.log(
     JSON.stringify({
@@ -1384,6 +1443,10 @@ export interface LaunchStatus {
   name: string;
   launch_state: LaunchState;
   launch_detail: string | null;
+  /** Whether this is the first bring-up or a redeploy over a live service. */
+  launch_kind: LaunchKind;
+  /** What asked for it: a person in the console, or a push. */
+  launch_trigger: LaunchTrigger;
   /** Where the underlying lifecycle actually got to. */
   provision_state: string;
   build_state: string;
@@ -1400,6 +1463,8 @@ function launchStatusOf(
     name: row.name,
     launch_state: row.launch_state,
     launch_detail: row.launch_detail,
+    launch_kind: row.launch_kind,
+    launch_trigger: row.launch_trigger,
     provision_state: row.provision_state,
     build_state: row.build_state,
     steps,
@@ -1447,12 +1512,26 @@ async function recordLaunch(
  * refused while another provision holds the row, and granted once that hold is
  * older than any live request could possibly be.
  */
-async function claimLaunch(name: string, actor: string): Promise<boolean> {
+async function claimLaunch(
+  name: string,
+  actor: string,
+  trigger: LaunchTrigger
+): Promise<boolean> {
   const pool = await getPool();
   const { rows } = await pool.query(
     `UPDATE microservice_clusters
         SET launch_state = 'provisioning',
-            launch_detail = 'Creating the cluster, image repository, log groups and build project.',
+            launch_detail = CASE
+              WHEN service_arn IS NULL
+                THEN 'Creating the cluster, image repository, log groups and build project.'
+              ELSE 'Checking the infrastructure before rebuilding.'
+            END,
+            -- Decided here, in the same statement that takes the claim, so it
+            -- cannot disagree with the state it describes: whether a service
+            -- already exists is exactly what separates a launch from a rebuild,
+            -- and it is true or false at this instant and not later.
+            launch_kind = CASE WHEN service_arn IS NULL THEN 'launch' ELSE 'rebuild' END,
+            launch_trigger = $4,
             launch_requested_by = $2,
             launch_requested_at = NOW(),
             launch_finished_at = NULL,
@@ -1463,7 +1542,7 @@ async function claimLaunch(name: string, actor: string): Promise<boolean> {
           OR updated_at < NOW() - ($3::int * INTERVAL '1 second')
         )
       RETURNING name`,
-    [name, actor, LAUNCH_STALL_SECONDS]
+    [name, actor, LAUNCH_STALL_SECONDS, trigger]
   );
   return rows.length > 0;
 }
@@ -1512,7 +1591,10 @@ async function claimDeploy(name: string, from: LaunchState): Promise<boolean> {
 export async function launchMicroservice(input: {
   name: string;
   actor: string;
+  /** Defaults to the console, which is where all but the webhook come from. */
+  trigger?: LaunchTrigger | undefined;
 }): Promise<LaunchStatus> {
+  const trigger: LaunchTrigger = input.trigger ?? 'console';
   const row = await requireMicroservice(input.name);
 
   // Refused rather than recorded as a launch failure: there is nothing here to
@@ -1527,11 +1609,26 @@ export async function launchMicroservice(input: {
     );
   }
 
-  if (!(await claimLaunch(input.name, input.actor))) {
+  if (!(await claimLaunch(input.name, input.actor, trigger))) {
     // Another request is provisioning this right now. Report where it is
     // instead of starting a second one alongside it.
     return launchStatusOf(await requireMicroservice(input.name), [], null);
   }
+
+  // Read back rather than reused: the claim is what decided whether this is a
+  // launch or a rebuild, and `row` was fetched before it.
+  const claimed = await requireMicroservice(input.name);
+
+  await recordEvent({
+    microservice: input.name,
+    kind: claimed.launch_kind === 'rebuild' ? 'rebuild' : 'launch',
+    actor: input.actor,
+    trigger,
+    detail:
+      claimed.launch_kind === 'rebuild'
+        ? `Rebuilding from ${claimed.repo_full_name}@${claimed.branch}.`
+        : `Launching from ${claimed.repo_full_name}@${claimed.branch}.`,
+  });
 
   const steps: string[] = [];
 
@@ -1555,17 +1652,27 @@ export async function launchMicroservice(input: {
     if (BUILD_IN_FLIGHT.has(scaffolded.build_state)) {
       steps.push('image build already running');
     } else {
-      const started = await buildMicroservice({ name: input.name, actor: input.actor });
+      const started = await buildMicroservice({
+        name: input.name,
+        actor: input.actor,
+        trigger,
+      });
       imageTag = started.image_tag;
       steps.push(`image build ${started.build_id} started`);
     }
 
+    const rebuilding = claimed.launch_kind === 'rebuild';
     await recordLaunch(
       input.name,
       'building',
-      `Building ${imageTag ? `image ${imageTag}` : 'the image'} from ` +
-        `${scaffolded.repo_full_name}@${scaffolded.branch}. It deploys on its own when the ` +
-        'build succeeds.'
+      `${rebuilding ? 'Rebuilding' : 'Building'} ${imageTag ? `image ${imageTag}` : 'the image'} ` +
+        `from ${scaffolded.repo_full_name}@${scaffolded.branch}. ` +
+        (rebuilding
+          ? // Said explicitly, because it is the question someone watching a
+            // rebuild actually has: the service they are using is not going
+            // down while this runs.
+            'The running service keeps serving until the new image is deployed.'
+          : 'It deploys on its own when the build succeeds.')
     );
 
     console.log(
@@ -1638,21 +1745,46 @@ export async function advanceLaunch(row: MicroserviceRow): Promise<MicroserviceR
   // their action, and the reconcile has no user of its own to attribute it to.
   const actor = row.launch_requested_by ?? 'launch';
 
+  const rebuilding = row.launch_kind === 'rebuild';
+  const trigger: MicroserviceEventTrigger = row.launch_trigger === 'push' ? 'push' : 'console';
+
   try {
     const result = await deployMicroservice({ name: row.name, actor });
     if (result.error) {
       await recordLaunch(row.name, 'failed', `Could not start the service: ${result.error}`, {
         finished: true,
       });
+      await recordEvent({
+        microservice: row.name,
+        kind: 'deploy_failed',
+        actor,
+        trigger,
+        detail: result.error,
+        commitSha: row.build_commit_sha,
+        imageTag: row.image_tag,
+      });
     } else {
       await recordLaunch(
         row.name,
         'running',
         row.image_tag
-          ? `Deployed image ${row.image_tag} and started the ECS service.`
-          : 'Deployed and started the ECS service.',
+          ? `${rebuilding ? 'Redeployed' : 'Deployed'} image ${row.image_tag} and ` +
+            `${rebuilding ? 'replaced the running tasks' : 'started the ECS service'}.`
+          : `${rebuilding ? 'Redeployed' : 'Deployed'} and started the ECS service.`,
         { finished: true }
       );
+      await recordEvent({
+        microservice: row.name,
+        kind: 'deployed',
+        actor,
+        trigger,
+        detail: rebuilding
+          ? 'Redeployed over the running service.'
+          : 'Deployed and started the ECS service.',
+        commitSha: row.build_commit_sha,
+        imageTag: row.image_tag,
+        buildId: row.build_id,
+      });
       console.log(
         JSON.stringify({
           event: 'microservice_launch_completed',
@@ -1665,6 +1797,15 @@ export async function advanceLaunch(row: MicroserviceRow): Promise<MicroserviceR
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await recordLaunch(row.name, 'failed', message, { finished: true });
+    await recordEvent({
+      microservice: row.name,
+      kind: 'deploy_failed',
+      actor,
+      trigger,
+      detail: message,
+      commitSha: row.build_commit_sha,
+      imageTag: row.image_tag,
+    });
     console.error('microservice launch deploy failed', { microservice: row.name, error: message });
   }
 
@@ -1675,6 +1816,153 @@ export async function advanceLaunch(row: MicroserviceRow): Promise<MicroserviceR
 export async function clearLaunch(name: string): Promise<MicroserviceRow> {
   await recordLaunch(name, 'none', null);
   return requireMicroservice(name);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Microservices — rebuilding on a push
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface PushEventInput {
+  /** "owner/repo", exactly as GitHub spells it. */
+  repoFullName: string;
+  /** Branch name, already stripped of "refs/heads/". */
+  branch: string;
+  /** The new head. Null when GitHub reports none, which a branch delete does. */
+  commitSha: string | null;
+  /** The GitHub login that pushed, for attribution. */
+  pusher: string;
+  /** The head commit's first line, if there was one. */
+  message?: string | null | undefined;
+  /** GitHub's delivery id, carried into the logs so a push can be traced. */
+  deliveryId?: string | null | undefined;
+}
+
+export interface PushEventOutcome {
+  microservice: string;
+  /** What was done, or why nothing was. */
+  action: 'rebuilding' | 'already_building' | 'auto_deploy_off' | 'failed';
+  detail: string | null;
+}
+
+export interface PushEventResult {
+  repo_full_name: string;
+  branch: string;
+  commit_sha: string | null;
+  /** Every service that builds from this repo and branch. */
+  outcomes: PushEventOutcome[];
+}
+
+/**
+ * Rebuilds and redeploys whatever a push affects.
+ *
+ * The whole point of the webhook, and deliberately the only thing it does: the
+ * receiver verifies the signature and hands the facts here, where the decisions
+ * are made against the registry. So "which services does this commit affect"
+ * has one implementation, testable and in the VPC, rather than being spread
+ * across a public Lambda.
+ *
+ * A push may match several services — a monorepo with a Dockerfile per service
+ * is ordinary — so each is decided on its own and one failure does not stop the
+ * rest. Each one is `launchMicroservice`, which is idempotent and already knows
+ * how to provision what is missing, build, and deploy when the build lands. A
+ * push is therefore not a special path through the system; it is the same path
+ * with a different caller.
+ *
+ * What it deliberately does not do:
+ *
+ *   * Interrupt a build already running. The branch head is read when the build
+ *     starts, so a build in flight is either already building this commit or is
+ *     one commit behind for a few minutes. Cancelling and restarting on every
+ *     push would make a busy branch build nothing at all.
+ *   * Act on a branch deletion. GitHub sends a push with an all-zero head for
+ *     that, and rebuilding a branch that no longer exists can only fail.
+ */
+export async function handlePushEvent(input: PushEventInput): Promise<PushEventResult> {
+  const pool = await getPool();
+  const actor = `push:${input.pusher}`;
+
+  const { rows } = await pool.query(
+    `SELECT name, auto_deploy, launch_state, build_state
+       FROM microservice_clusters
+      WHERE repo_full_name = $1 AND branch = $2
+      ORDER BY name`,
+    [input.repoFullName, input.branch]
+  );
+
+  const outcomes: PushEventOutcome[] = [];
+
+  for (const row of rows) {
+    const name = String(row.name);
+
+    if (row.auto_deploy === false) {
+      outcomes.push({
+        microservice: name,
+        action: 'auto_deploy_off',
+        detail: 'Automatic deployment is turned off for this service.',
+      });
+      /**
+       * Recorded rather than merely skipped.
+       *
+       * "I pushed and nothing happened" is otherwise indistinguishable from a
+       * webhook that never arrived, and the two have completely different
+       * fixes. This is the only entry in the history that records a
+       * non-deployment, and it exists for exactly that reason.
+       */
+      await recordEvent({
+        microservice: name,
+        kind: 'push_ignored',
+        actor,
+        trigger: 'push',
+        detail:
+          `Push to ${input.repoFullName}@${input.branch} ignored: automatic deployment is ` +
+          'off for this service.',
+        commitSha: input.commitSha,
+      });
+      continue;
+    }
+
+    if (LAUNCH_IN_FLIGHT.includes(row.launch_state as LaunchState)) {
+      outcomes.push({
+        microservice: name,
+        action: 'already_building',
+        detail: `A ${row.launch_state} is already in flight; this push joins it.`,
+      });
+      continue;
+    }
+
+    try {
+      const status = await launchMicroservice({ name, actor, trigger: 'push' });
+      outcomes.push({
+        microservice: name,
+        action: status.launch_state === 'failed' ? 'failed' : 'rebuilding',
+        detail: status.launch_detail,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      outcomes.push({ microservice: name, action: 'failed', detail: message });
+      console.error('push rebuild failed', { microservice: name, error: message });
+    }
+  }
+
+  console.log(
+    JSON.stringify({
+      event: 'github_push_handled',
+      delivery: input.deliveryId ?? null,
+      repo: input.repoFullName,
+      branch: input.branch,
+      commit: input.commitSha,
+      pusher: input.pusher,
+      matched: outcomes.length,
+      outcomes: outcomes.map((outcome) => `${outcome.microservice}:${outcome.action}`),
+    })
+  );
+
+  return {
+    repo_full_name: input.repoFullName,
+    branch: input.branch,
+    commit_sha: input.commitSha,
+    outcomes,
+  };
 }
 
 export interface LaunchReconcileResult {
@@ -1726,6 +2014,10 @@ export async function reconcileLaunches(): Promise<LaunchReconcileResult> {
         const result = await launchMicroservice({
           name,
           actor: row.launch_requested_by ?? 'scheduled reconcile',
+          // Carried forward rather than defaulted: repairing a stalled launch
+          // must not relabel a push-triggered rebuild as something somebody
+          // did in the console.
+          trigger: row.launch_trigger,
         });
         launches.push({
           name,
@@ -1886,6 +2178,14 @@ export async function rollbackMicroservice(input: {
       combined.error ?? combined.steps.join('; ').slice(0, 2000),
     ]
   );
+
+  await recordEvent({
+    microservice: input.name,
+    kind: 'rolled_back',
+    actor: input.actor,
+    detail: combined.error ?? `Rolled back to image ${input.image_tag}.`,
+    imageTag: input.image_tag,
+  });
 
   console.log(
     JSON.stringify({

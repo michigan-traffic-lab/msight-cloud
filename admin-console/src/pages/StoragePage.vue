@@ -8,7 +8,9 @@ import {
   type StoragesResponse,
 } from '@/api/client';
 import { useAsyncValue } from '@/composables/useAsyncValue';
+import AwsLink from '@/components/AwsLink.vue';
 import PageHeader from '@/components/PageHeader.vue';
+import { aws } from '@/aws-links';
 import AsyncValue from '@/components/AsyncValue.vue';
 import InfoHint from '@/components/InfoHint.vue';
 import SectionCard from '@/components/SectionCard.vue';
@@ -744,7 +746,13 @@ async function copy(text: string | null | undefined) {
                   <q-item class="q-px-none">
                     <q-item-section>
                       <q-item-label caption>Bucket</q-item-label>
-                      <q-item-label class="mono">{{ selected.bucket }}</q-item-label>
+                      <q-item-label class="mono">
+                        {{ selected.bucket }}
+                        <!-- Objects, lifecycle rules and the policy are S3's.
+                             This page describes the bucket; it does not browse
+                             it. -->
+                        <AwsLink :href="aws.s3Bucket(selected.bucket)" class="q-ml-xs" />
+                      </q-item-label>
                     </q-item-section>
                     <q-item-section side>
                       <q-btn

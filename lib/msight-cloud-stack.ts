@@ -20,7 +20,11 @@ import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
 import { logRetentionFromContext } from './log-retention';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
+import {
+  HttpLambdaAuthorizer,
+  HttpLambdaResponseType,
+  HttpUserPoolAuthorizer,
+} from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { WebSocketLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -1662,7 +1666,9 @@ export class MsightCloudStack extends cdk.Stack {
         { userPoolClients: [adminUserPoolClient] }
       ),
       corsPreflight: {
-        allowHeaders: ['content-type', 'authorization'],
+        // `x-msight-token` is where the MCP route takes its JWT — see the
+        // authorizer below for why it cannot be `authorization`.
+        allowHeaders: ['content-type', 'authorization', 'x-msight-token'],
         allowMethods: [
           apigwv2.CorsHttpMethod.GET,
           apigwv2.CorsHttpMethod.POST,
@@ -2060,6 +2066,68 @@ export class MsightCloudStack extends cdk.Stack {
     githubAppSecret.grantRead(adminVpcApiLambda);
     githubAppSecret.grantWrite(adminVpcApiLambda);
     githubApiLambda.grantInvoke(adminVpcApiLambda);
+
+    /**
+     * Where GitHub delivers pushes, so a commit rebuilds and redeploys itself.
+     *
+     * Its own function, and a deliberately small one. This is the only
+     * unauthenticated entry point in the deployment that can cause a
+     * deployment, so it does exactly one thing — prove the request came from
+     * the App by its HMAC — and then hands the facts to the in-VPC function
+     * that already knows how to build and deploy.
+     *
+     * Outside the VPC and with no database access, on purpose. It needs the
+     * webhook secret and the right to invoke one function; a route to Aurora as
+     * well would widen what a flaw here could reach and buy nothing, since
+     * every decision about what to rebuild is made on the other side.
+     *
+     * Ten seconds is ample: it reads one secret, checks an HMAC, and hands the
+     * push on asynchronously. It deliberately does not wait for the rebuild —
+     * API Gateway caps this integration at 30 seconds and a first-time
+     * provision can exceed that, which would have GitHub log a failed delivery
+     * for work that succeeded.
+     */
+    const githubWebhookLambda = new NodejsFunction(this, 'GithubWebhookLambda', {
+      logGroup: new logs.LogGroup(this, 'GithubWebhookLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/github-webhook`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+      ...publicLambdaProps,
+      entry: path.join(__dirname, '../src/functions/github-webhook/handler.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(10),
+      environment: {
+        SERVICE_NAME: 'github-webhook',
+        BUILD_ID: buildId,
+        GITHUB_APP_SECRET_ARN: githubAppSecret.secretArn,
+        ADMIN_VPC_API_FUNCTION_NAME: adminVpcApiLambda.functionName,
+      },
+    });
+
+    // Read only, and only for `webhook_secret`. It never needs the private key,
+    // but Secrets Manager grants are per-secret, so this is as narrow as the
+    // service allows.
+    githubAppSecret.grantRead(githubWebhookLambda);
+    adminVpcApiLambda.grantInvoke(githubWebhookLambda);
+
+    /**
+     * Unauthenticated, which is the only thing GitHub can be.
+     *
+     * A webhook carries no bearer token — it proves itself with an HMAC over
+     * the body, checked inside the function before anything is parsed. So this
+     * route sits on the public API rather than the admin one, where it would
+     * otherwise be refused by the Cognito authorizer before the signature could
+     * be looked at.
+     *
+     * The path is fixed: it is registered as the App's webhook URL, and every
+     * existing installation points at it.
+     */
+    httpApi.addRoutes({
+      path: '/v1/github/webhook',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new HttpLambdaIntegration('GithubWebhookIntegration', githubWebhookLambda),
+    });
 
     // Sensor reconciliation: creates and deletes the per-sensor queue,
     // subscription, task definition and service.
@@ -2797,7 +2865,6 @@ export class MsightCloudStack extends cdk.Stack {
     //
     // Implements the Model Context Protocol (Streamable HTTP, 2024-11-05).
     // No VPC: it proxies to the public adminApi endpoint and needs no database.
-    // The defaultAuthorizer on adminApi covers this route automatically.
     // -------------------------
     const mcpApiLambda = new NodejsFunction(this, 'McpApiLambda', {
       logGroup: new logs.LogGroup(this, 'McpApiLambdaLogGroup', {
@@ -2812,16 +2879,115 @@ export class MsightCloudStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
       bundling: { minify: true, sourceMap: false, target: 'node22' },
       environment: {
-        ADMIN_API_URL: adminApi.apiEndpoint,
+        // The in-VPC function is invoked directly rather than called over the
+        // API: an MCP caller holds a token, not a Cognito JWT, so there is
+        // nothing the admin API's own authorizer would accept.
+        ADMIN_VPC_API_FUNCTION_NAME: adminVpcApiLambda.functionName,
       },
+    });
+
+    adminVpcApiLambda.grantInvoke(mcpApiLambda);
+
+    /**
+     * The MCP route authorises on `X-Msight-Token`, not `Authorization`.
+     *
+     * Not a preference — a workaround for the client. `mcp-remote`, which is
+     * how a desktop MCP client reaches an HTTP server, installs its own OAuth
+     * provider on the transport and that provider *overwrites* the
+     * Authorization header on every request. A token passed with
+     * `--header Authorization:Bearer …` arrives here as the literal string
+     * "Bearer " with nothing after it, so the JWT authorizer rejects it, and
+     * mcp-remote reads that 401 as "begin OAuth", tries Dynamic Client
+     * Registration, gets a 404 from an API that has no such endpoint, and
+     * exits. The desktop client reports only "server disconnected".
+     *
+     * Any other header name survives untouched, so the fix is to authorise on
+     * one. The rest of the API keeps the default Authorization authorizer: the
+     * console sends that header and is not affected.
+     */
+    /**
+     * Checks the MCP token against the table that issued it.
+     *
+     * In the VPC because that table is in Aurora. The cold start that costs is
+     * absorbed by the authorizer cache below: the same token presented again
+     * inside the TTL never reaches this function.
+     */
+    const mcpAuthorizerLambda = new NodejsFunction(this, 'McpAuthorizerLambda', {
+      logGroup: new logs.LogGroup(this, 'McpAuthorizerLambdaLogGroup', {
+        logGroupName: `/${name.logPrefix}/lambda/mcp-authorizer`,
+        retention: logRetention.lambda,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: path.join(__dirname, '../src/functions/mcp-authorizer/handler.ts'),
+      handler: 'handler',
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(10),
+      vpc,
+      vpcSubnets: appSubnetSelection,
+      securityGroups: [lambdaSg],
+      bundling: { minify: true, sourceMap: false, target: 'node22' },
+      environment: {
+        SERVICE_NAME: 'mcp-authorizer',
+        DB_HOST: dbEndpoint,
+        DB_PORT: '5432',
+        DB_NAME: 'msight',
+        DB_SECRET_ARN: cluster.secret!.secretArn,
+      },
+    });
+
+    cluster.secret!.grantRead(mcpAuthorizerLambda);
+
+    /**
+     * The MCP route authorises on `X-Msight-Token`, not `Authorization`.
+     *
+     * Not a preference — a workaround for the client. `mcp-remote`, which is
+     * how a desktop MCP client reaches an HTTP server, installs its own OAuth
+     * provider on the transport and that provider *overwrites* the
+     * Authorization header on every request, so a token passed with
+     * `--header Authorization:…` arrives as the bare string "Bearer ". Any
+     * other header name survives untouched.
+     *
+     * Cached for five minutes against the token itself, which is what keeps a
+     * database lookup off every MCP call. Revoking a token therefore takes
+     * effect within that window rather than instantly — the alternative is a
+     * query per request on a credential check, and five minutes is a fair price
+     * for it.
+     */
+    const mcpAuthorizer = new HttpLambdaAuthorizer('McpAuthorizer', mcpAuthorizerLambda, {
+      authorizerName: 'msight-mcp-authorizer',
+      identitySource: ['$request.header.X-Msight-Token'],
+      responseTypes: [HttpLambdaResponseType.SIMPLE],
+      resultsCacheTtl: cdk.Duration.minutes(5),
+    });
+
+    const mcpIntegration = new HttpLambdaIntegration('McpApiIntegration', mcpApiLambda, {
+      scopePermissionToRoute: false,
     });
 
     adminApi.addRoutes({
       path: '/mcp',
       methods: [apigwv2.HttpMethod.POST],
-      integration: new HttpLambdaIntegration('McpApiIntegration', mcpApiLambda, {
-        scopePermissionToRoute: false,
-      }),
+      integration: mcpIntegration,
+      authorizer: mcpAuthorizer,
+    });
+
+    /**
+     * GET and DELETE exist only to answer correctly.
+     *
+     * Streamable HTTP lets a client open GET /mcp for a server-initiated SSE
+     * stream and DELETE /mcp to end a session. This server does neither — it is
+     * stateless, one request per invocation — and the spec says a server
+     * without them must answer 405. Without these routes API Gateway answers
+     * 404, which reads to a client as "wrong URL" rather than "that optional
+     * feature is not offered", and sends it looking for an endpoint that was
+     * never there.
+     */
+    adminApi.addRoutes({
+      path: '/mcp',
+      methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.DELETE],
+      integration: mcpIntegration,
+      authorizer: mcpAuthorizer,
     });
 
     // -------------------------
@@ -2919,8 +3085,10 @@ export class MsightCloudStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'GithubWebhookUrl', {
       value: `${httpApi.apiEndpoint}/v1/github/webhook`,
       description:
-        'Where the GitHub App should send push events. Not served yet — this is the ' +
-        'public API, so the receiver will authenticate by HMAC signature, not Cognito.',
+        'Where the GitHub App sends push events. On the public API, because a webhook ' +
+        'carries no Cognito token: the receiver authenticates each delivery by its HMAC ' +
+        'signature instead. A push to a branch a microservice builds from rebuilds and ' +
+        'redeploys it.',
     });
 
     new cdk.CfnOutput(this, 'GithubAppSecretName', {

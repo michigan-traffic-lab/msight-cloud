@@ -203,6 +203,7 @@ export async function convertManifest(code: string): Promise<ManifestConversion>
     name: typeof body.name === 'string' ? body.name : null,
     html_url: typeof body.html_url === 'string' ? body.html_url : null,
     owner_login: owner && typeof owner.login === 'string' ? owner.login : null,
+    owner_type: owner && typeof owner.type === 'string' ? owner.type : null,
     pem,
     webhook_secret: typeof body.webhook_secret === 'string' ? body.webhook_secret : null,
     permissions: (body.permissions ?? {}) as Record<string, string>,

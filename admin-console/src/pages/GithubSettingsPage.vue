@@ -120,6 +120,14 @@ const connecting = ref(false);
  * "whatever the deployment is called".
  */
 const defaultAppName = computed(() => appStatus.data.value?.suggested_app_name ?? 'MSight');
+
+function copyWebhookUrl(): void {
+  const url = appStatus.data.value?.webhook_url ?? '';
+  if (!url) return;
+  void navigator.clipboard.writeText(url).then(() => {
+    $q.notify({ message: 'Webhook URL copied', color: 'positive', icon: 'check', timeout: 1500 });
+  });
+}
 const manifestForm = ref<HTMLFormElement | null>(null);
 const manifestAction = ref('');
 const manifestPayload = ref('');
@@ -533,6 +541,59 @@ function disconnect(installation: GithubInstallation): void {
             {{ formatWhen(appStatus.data.value?.app?.configured_at ?? null) }}. Since no GitHub
             identity is stored, this is the record of who wired it up.
           </div>
+
+          <q-separator class="q-my-md" />
+
+          <!--
+            The one piece of this setup that cannot be done from here.
+            `hook_attributes.active` is set when an App is created and there is
+            no API to change it afterwards — `PATCH /app/hook/config` covers the
+            URL, the content type and the secret, but not that flag. An App
+            created before the receiver existed therefore has its webhook
+            switched off, and nothing in this console can tell: GitHub does not
+            report the flag either. So it is stated rather than detected.
+          -->
+          <div class="text-caption text-grey-7 text-uppercase q-mb-sm">Push deliveries</div>
+          <div class="text-body2 text-grey-8" style="max-width: 74ch">
+            A push to a branch a microservice builds from rebuilds and redeploys it. GitHub
+            delivers those pushes here:
+          </div>
+          <q-input
+            :model-value="appStatus.data.value?.webhook_url ?? ''"
+            readonly
+            dense
+            outlined
+            class="q-mt-sm"
+            input-class="mono"
+          >
+            <template #append>
+              <q-btn
+                flat
+                round
+                dense
+                size="sm"
+                icon="content_copy"
+                @click="copyWebhookUrl"
+              />
+            </template>
+          </q-input>
+          <q-banner rounded dense class="bg-amber-1 text-grey-9 q-mt-sm">
+            <template #avatar><q-icon name="priority_high" color="warning" /></template>
+            <div class="text-body2" style="max-width: 70ch">
+              If this App was created before automatic rebuilds existed, its webhook is switched
+              off and nothing will arrive. Open
+              <a
+                v-if="appStatus.data.value?.app_settings_url"
+                :href="appStatus.data.value.app_settings_url"
+                target="_blank"
+                rel="noopener"
+                class="text-primary"
+                >the App's settings on GitHub</a
+              ><span v-else>the App's settings on GitHub</span>, check that the Webhook URL
+              matches the one above, and tick <strong>Active</strong>. There is no API for that
+              flag, so it cannot be done from here. Apps created from now on have it on already.
+            </div>
+          </q-banner>
 
           <q-separator class="q-my-md" />
 

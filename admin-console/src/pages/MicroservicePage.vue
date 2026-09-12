@@ -14,11 +14,15 @@ import {
   type LaunchStatus,
   type LogTail,
   type Microservice,
+  type MicroserviceEvent,
+  type MicroserviceEventKind,
   type MicroserviceStatus,
 } from '@/api/client';
+import AwsLink from '@/components/AwsLink.vue';
 import InfoHint from '@/components/InfoHint.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import SectionCard from '@/components/SectionCard.vue';
+import { aws } from '@/aws-links';
 import { bytes, mib, since, taskSize, timeOnly, vcpu, when } from '@/format';
 import { highlight, isFiltering, matches, severityOf, shortStream } from '@/log-filter';
 import { useAuthStore } from '@/stores/auth';
@@ -95,17 +99,30 @@ async function loadStatus(quiet = false): Promise<void> {
     // Announced on the transition only, so a page left open does not repeat it
     // every six seconds.
     if (previousLaunch !== null && next.microservice.launch_state !== previousLaunch) {
+      const wasRebuild = next.microservice.launch_kind === 'rebuild';
+      const byPush = next.microservice.launch_trigger === 'push';
+
+      // Every launch transition writes a history entry, so a state change is
+      // exactly when the history is stale. Only refetched if it has been opened
+      // once — an unopened tab does not need to be kept current.
+      if (events.value) void loadEvents();
+
       if (next.microservice.launch_state === 'running') {
         $q.notify({
           type: 'positive',
-          message: `${requested} is running.`,
+          message: wasRebuild
+            ? `${requested} redeployed${byPush ? ' from a push' : ''}.`
+            : `${requested} is running.`,
+          ...(next.microservice.build_commit_sha
+            ? { caption: `Commit ${next.microservice.build_commit_sha.slice(0, 7)}` }
+            : {}),
           position: 'top',
           timeout: 9000,
         });
       } else if (next.microservice.launch_state === 'failed') {
         $q.notify({
           type: 'negative',
-          message: `${requested}: the launch did not finish.`,
+          message: `${requested}: the ${wasRebuild ? 'rebuild' : 'launch'} did not finish.`,
           ...(next.microservice.launch_detail
             ? { caption: next.microservice.launch_detail }
             : {}),
@@ -318,6 +335,109 @@ function onLogScroll(event: Event): void {
   followLogs.value = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
 }
 
+// ── History ─────────────────────────────────────────────────────────────────
+
+/**
+ * What has happened to this service, as opposed to what is true about it now.
+ *
+ * Every other panel on this page is a snapshot the next change overwrites. This
+ * is the one that accumulates — and the only place a deployment can be traced
+ * back to the commit that caused it, which is what an automatic rebuild makes
+ * necessary rather than merely nice.
+ */
+const events = ref<MicroserviceEvent[] | null>(null);
+const eventsLoading = ref(false);
+const eventsError = ref<string | null>(null);
+
+async function loadEvents(): Promise<void> {
+  if (!name.value) return;
+  const requested = name.value;
+  eventsLoading.value = true;
+  eventsError.value = null;
+  try {
+    const result = await api.microserviceEvents(requested, 50);
+    if (name.value !== requested) return;
+    events.value = result.events;
+  } catch (error) {
+    if (name.value !== requested) return;
+    eventsError.value = error instanceof ApiError ? error.message : 'Could not load the history.';
+  } finally {
+    if (name.value === requested) eventsLoading.value = false;
+  }
+}
+
+// ── Ways through to AWS ─────────────────────────────────────────────────────
+
+/**
+ * Built from stored ARNs, so each one is null until the thing exists.
+ *
+ * That nullness is the useful part: the header link appears when there is an
+ * ECS service to look at and not before, rather than offering a link to a
+ * cluster page that says "not found" for a service nobody has launched.
+ */
+const awsService = computed(() => aws.ecsService(service.value?.service_arn));
+const awsCluster = computed(() => aws.ecsCluster(cluster.value?.cluster_arn));
+const awsLogGroup = computed(() => aws.logGroup(service.value?.log_group_name));
+const awsBuildLogGroup = computed(() => aws.logGroup(service.value?.build_log_group));
+const awsBuildProject = computed(() => aws.codeBuildProject(service.value?.build_project_name));
+const awsBuild = computed(() => aws.codeBuildBuild(service.value?.build_id));
+const awsEcr = computed(() => aws.ecrRepository(service.value?.ecr_repository_uri));
+
+/** The header's single link: the service if it exists, else its cluster. */
+const awsPrimary = computed(() => awsService.value ?? awsCluster.value);
+
+// ── Following the branch ────────────────────────────────────────────────────
+
+const autoDeployBusy = ref(false);
+
+async function setAutoDeploy(value: boolean): Promise<void> {
+  const row = service.value;
+  if (!row) return;
+
+  autoDeployBusy.value = true;
+  try {
+    await api.microserviceUpdate(row.name, { auto_deploy: value });
+    await loadStatus(true);
+    $q.notify({
+      type: 'positive',
+      message: value
+        ? `${row.name} will rebuild on every push to ${row.branch}.`
+        : `${row.name} will no longer rebuild on a push.`,
+      position: 'top',
+    });
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: error instanceof ApiError ? error.message : 'Could not change the setting.',
+      position: 'top',
+    });
+  } finally {
+    autoDeployBusy.value = false;
+  }
+}
+
+const EVENT_STYLES: Record<
+  MicroserviceEventKind,
+  { icon: string; colour: string; label: string }
+> = {
+  launch: { icon: 'rocket_launch', colour: 'primary', label: 'Launch started' },
+  rebuild: { icon: 'sync', colour: 'primary', label: 'Rebuild started' },
+  build_started: { icon: 'build', colour: 'info', label: 'Build started' },
+  build_succeeded: { icon: 'check_circle', colour: 'positive', label: 'Build succeeded' },
+  build_failed: { icon: 'error', colour: 'negative', label: 'Build failed' },
+  deployed: { icon: 'cloud_done', colour: 'positive', label: 'Deployed' },
+  deploy_failed: { icon: 'cloud_off', colour: 'negative', label: 'Deploy failed' },
+  restarted: { icon: 'restart_alt', colour: 'warning', label: 'Restarted' },
+  rolled_back: { icon: 'history', colour: 'warning', label: 'Rolled back' },
+  push_ignored: { icon: 'block', colour: 'grey-6', label: 'Push ignored' },
+};
+
+function eventStyle(kind: MicroserviceEventKind) {
+  return (
+    EVENT_STYLES[kind] ?? { icon: 'circle', colour: 'grey-6', label: kind.replace(/_/g, ' ') }
+  );
+}
+
 // ── Loading, in the order the tabs need it ──────────────────────────────────
 
 watch(
@@ -329,6 +449,7 @@ watch(
     logs.value = null;
     cluster.value = null;
     health.value = null;
+    events.value = null;
     if (value) void loadStatus().then(() => loadCapacity());
   },
   { immediate: true }
@@ -339,6 +460,7 @@ watch(
 watch(tab, (value) => {
   if (value === 'logs' && !logs.value) void loadLogs();
   if (value === 'capacity' && !health.value) void loadCapacity();
+  if (value === 'activity' && !events.value) void loadEvents();
   if (value !== 'logs') stopLogPolling();
 });
 
@@ -509,6 +631,36 @@ const LAUNCH_TITLES: Record<LaunchState, string> = {
   running: 'Launched',
   failed: 'The launch did not finish',
 };
+
+/**
+ * The same sequence, worded for a service that is already up.
+ *
+ * Not cosmetic. "Starting the service" over something that has been serving
+ * traffic for a week reads as an outage; what is actually happening is that a
+ * new image is being built and rolled in underneath, with the old one still
+ * answering until it lands. The words are the only thing that says so.
+ */
+const REBUILD_TITLES: Record<LaunchState, string> = {
+  none: '',
+  requested: 'Rebuild queued',
+  provisioning: 'Checking infrastructure',
+  building: 'Rebuilding the image',
+  deploying: 'Redeploying',
+  running: 'Redeployed',
+  failed: 'The rebuild did not finish',
+};
+
+const rebuilding = computed(() => service.value?.launch_kind === 'rebuild');
+
+const launchTitle = computed(() => {
+  const state = service.value?.launch_state ?? 'none';
+  return (rebuilding.value ? REBUILD_TITLES : LAUNCH_TITLES)[state];
+});
+
+/** Set when the thing in flight was started by a push rather than a person. */
+const launchFromPush = computed(
+  () => service.value?.launch_trigger === 'push' && service.value.launch_state !== 'none'
+);
 
 const LAUNCH_STAGES = [
   { key: 'infra', label: 'Cluster & scaffolding', states: ['requested', 'provisioning'] },
@@ -874,7 +1026,9 @@ function editCapacity(): void {
           icon="rocket_launch"
           :label="
             service.launch_state === 'failed'
-              ? 'Retry launch'
+              ? rebuilding
+                ? 'Retry rebuild'
+                : 'Retry launch'
               : service.provision_state === 'provisioned'
                 ? 'Rebuild & redeploy'
                 : 'Launch'
@@ -882,6 +1036,14 @@ function editCapacity(): void {
           :disable="busy || !service.cluster_name"
           @click="launch"
         />
+
+        <!--
+          Straight through to ECS. This console shows the six numbers that
+          matter; the moment one of them is wrong the next question is usually
+          one only the AWS console answers, and finding the resource by hand
+          means knowing its generated name.
+        -->
+        <AwsLink :href="awsPrimary" button :label="awsService ? 'ECS service' : 'ECS cluster'" />
 
         <q-btn v-if="isAdmin && service" outline color="primary" icon="more_horiz" label="Manage">
           <q-menu auto-close>
@@ -995,7 +1157,18 @@ function editCapacity(): void {
           <q-spinner v-if="launchInFlight(service.launch_state)" color="info" size="24px" />
           <q-icon v-else name="error" color="negative" />
         </template>
-        <div class="text-weight-medium">{{ LAUNCH_TITLES[service.launch_state] }}</div>
+        <div class="row items-center q-gutter-sm">
+          <div class="text-weight-medium">{{ launchTitle }}</div>
+          <!--
+            What started it. Only worth saying when it was not a person on this
+            page: an unexpected rebuild is otherwise unattributable until you
+            go and read the history.
+          -->
+          <q-badge v-if="launchFromPush" color="blue-1" text-color="primary">
+            <q-icon name="commit" size="13px" class="q-mr-xs" />
+            triggered by push
+          </q-badge>
+        </div>
         <div v-if="service.launch_detail" class="text-body2">{{ service.launch_detail }}</div>
         <div class="row items-center q-gutter-xs q-mt-sm">
           <q-chip
@@ -1191,6 +1364,40 @@ function editCapacity(): void {
                       </tr>
                     </tbody>
                   </table>
+
+                  <q-separator class="q-my-md" />
+
+                  <!--
+                    The setting that decides whether this source is followed or
+                    merely recorded. On the Source card because that is what it
+                    is about, and because "which branch" and "does it follow it"
+                    are one question read together.
+                  -->
+                  <div class="row items-start no-wrap">
+                    <q-toggle
+                      :model-value="service.auto_deploy"
+                      :disable="!isAdmin || autoDeployBusy"
+                      color="primary"
+                      dense
+                      class="q-mr-sm"
+                      @update:model-value="setAutoDeploy"
+                    />
+                    <div>
+                      <div class="text-body2 text-weight-medium">
+                        Deploy on every push to {{ service.branch }}
+                      </div>
+                      <div class="text-caption text-grey-7" style="max-width: 46ch">
+                        <template v-if="service.auto_deploy">
+                          A commit on this branch rebuilds the image and rolls it out. The running
+                          service keeps serving until the new image is ready.
+                        </template>
+                        <template v-else>
+                          Commits are recorded but nothing is built. Use Rebuild to pick up the
+                          branch when you want it.
+                        </template>
+                      </div>
+                    </div>
+                  </div>
                 </SectionCard>
               </div>
 
@@ -1334,24 +1541,42 @@ function editCapacity(): void {
               </div>
 
               <div class="col-12 col-md-6">
+                <!--
+                  Every row here names something that exists in AWS, so every
+                  row that has been provisioned carries a way through to it.
+                  The link is absent rather than dead when the resource has not
+                  been created yet — which is what the dashes mean.
+                -->
                 <SectionCard title="AWS resources" lede="What provisioning created, by name.">
                   <table class="facts">
                     <tbody>
                       <tr>
                         <th>ECS service</th>
-                        <td class="mono">{{ status?.ecs_service_name ?? '—' }}</td>
+                        <td class="mono">
+                          {{ status?.ecs_service_name ?? '—' }}
+                          <AwsLink :href="awsService" class="q-ml-xs" />
+                        </td>
                       </tr>
                       <tr>
                         <th>ECS cluster</th>
-                        <td class="mono">{{ status?.ecs_cluster_name ?? '—' }}</td>
+                        <td class="mono">
+                          {{ status?.ecs_cluster_name ?? '—' }}
+                          <AwsLink :href="awsCluster" class="q-ml-xs" />
+                        </td>
                       </tr>
                       <tr>
                         <th>Image repository</th>
-                        <td class="mono break">{{ service.ecr_repository_uri ?? '—' }}</td>
+                        <td class="mono break">
+                          {{ service.ecr_repository_uri ?? '—' }}
+                          <AwsLink :href="awsEcr" class="q-ml-xs" />
+                        </td>
                       </tr>
                       <tr>
                         <th>Build project</th>
-                        <td class="mono">{{ service.build_project_name ?? '—' }}</td>
+                        <td class="mono">
+                          {{ service.build_project_name ?? '—' }}
+                          <AwsLink :href="awsBuildProject" class="q-ml-xs" />
+                        </td>
                       </tr>
                       <tr>
                         <th>Container log</th>
@@ -1360,6 +1585,7 @@ function editCapacity(): void {
                           <span v-if="status?.logs" class="text-grey-6">
                             ({{ bytes(status.logs.stored_bytes) }})
                           </span>
+                          <AwsLink :href="awsLogGroup" class="q-ml-xs" />
                         </td>
                       </tr>
                       <tr>
@@ -1369,6 +1595,7 @@ function editCapacity(): void {
                           <span v-if="status?.build_logs" class="text-grey-6">
                             ({{ bytes(status.build_logs.stored_bytes) }})
                           </span>
+                          <AwsLink :href="awsBuildLogGroup" class="q-ml-xs" />
                         </td>
                       </tr>
                       <tr>
@@ -1410,6 +1637,16 @@ function editCapacity(): void {
                 }}
                 <InfoHint :text="HINTS.streams" />
               </div>
+              <!--
+                This tail is the last few hundred lines. Anything older, or any
+                query over them, belongs in CloudWatch — so the way there is
+                offered rather than left to be found.
+              -->
+              <AwsLink
+                :href="logSource === 'build' ? awsBuildLogGroup : awsLogGroup"
+                label="CloudWatch"
+                class="q-ml-sm"
+              />
               <q-space />
               <q-badge
                 v-if="logSource === 'build' && buildRunning(service.build_state)"
@@ -1865,6 +2102,103 @@ function editCapacity(): void {
 
           <!-- ── Activity ─────────────────────────────────────────────── -->
           <q-tab-panel name="activity" class="q-pa-md">
+            <!--
+              Above the ECS panels, and outside the v-else that hides them: this
+              is the half that exists before there is a service and survives
+              after one is replaced, which is exactly when it is wanted.
+            -->
+            <SectionCard
+              title="History"
+              lede="Builds, deployments and restarts, newest first. ECS keeps its own events for about an hour; this is what is left after that."
+              class="q-mb-md"
+              flush
+            >
+              <template #actions>
+                <q-btn
+                  flat
+                  round
+                  dense
+                  icon="refresh"
+                  size="sm"
+                  :loading="eventsLoading"
+                  @click="loadEvents()"
+                />
+              </template>
+
+              <div v-if="eventsError" class="q-pa-md text-body2 text-negative">
+                {{ eventsError }}
+              </div>
+
+              <div v-else-if="eventsLoading && !events" class="q-pa-md row items-center">
+                <q-spinner size="18px" color="grey-7" />
+                <span class="q-ml-sm text-body2 text-grey-7">Loading</span>
+              </div>
+
+              <div v-else-if="!events || events.length === 0" class="q-pa-md text-body2 text-grey-7">
+                Nothing recorded yet. Entries appear here from the next build,
+                deployment or restart onwards.
+              </div>
+
+              <q-list v-else separator>
+                <q-item v-for="event in events" :key="event.id">
+                  <q-item-section avatar top style="min-width: 40px">
+                    <q-icon
+                      :name="eventStyle(event.kind).icon"
+                      :color="eventStyle(event.kind).colour"
+                      size="21px"
+                    />
+                  </q-item-section>
+
+                  <q-item-section>
+                    <q-item-label class="row items-center q-gutter-xs">
+                      <span class="text-weight-medium">{{ eventStyle(event.kind).label }}</span>
+                      <!--
+                        The whole reason this table exists: which commit, and
+                        whether a person or a push asked for it.
+                      -->
+                      <q-badge
+                        v-if="event.trigger === 'push'"
+                        color="blue-1"
+                        text-color="primary"
+                      >
+                        push
+                      </q-badge>
+                      <q-badge
+                        v-if="event.commit_sha"
+                        color="grey-3"
+                        text-color="grey-8"
+                        class="mono"
+                      >
+                        {{ event.commit_sha.slice(0, 7) }}
+                      </q-badge>
+                      <q-badge
+                        v-if="event.image_tag"
+                        color="grey-3"
+                        text-color="grey-8"
+                        class="mono"
+                      >
+                        {{ event.image_tag }}
+                      </q-badge>
+                      <!-- The build's own page, for the phases and timings
+                           this row only summarises. -->
+                      <AwsLink
+                        :href="aws.codeBuildBuild(event.build_id)"
+                        label="build log"
+                      />
+                    </q-item-label>
+
+                    <q-item-label v-if="event.detail" caption class="text-grey-8">
+                      {{ event.detail }}
+                    </q-item-label>
+
+                    <q-item-label caption class="text-grey-6">
+                      {{ when(event.at) }} · {{ since(event.at) }} · {{ event.actor }}
+                    </q-item-label>
+                  </q-item-section>
+                </q-item>
+              </q-list>
+            </SectionCard>
+
             <div v-if="!runtime?.exists" class="text-body2 text-grey-7">
               There is no ECS service yet, so there is nothing for ECS to report.
             </div>
@@ -1903,7 +2237,12 @@ function editCapacity(): void {
                       </thead>
                       <tbody>
                         <tr v-for="task in runtime.tasks" :key="task.arn">
-                          <td class="mono">{{ task.arn.split('/').pop() }}</td>
+                          <td class="mono">
+                            {{ task.arn.split('/').pop() }}
+                            <!-- A stopped task's exit code and the image it
+                                 pulled are only on its own ECS page. -->
+                            <AwsLink :href="aws.ecsTask(service.service_arn, task.arn)" />
+                          </td>
                           <td>
                             {{ task.last_status }}
                             <div v-if="task.stopped_reason" class="text-negative text-caption">

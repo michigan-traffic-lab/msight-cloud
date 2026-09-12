@@ -20,7 +20,9 @@ import { useAsyncValue } from '@/composables/useAsyncValue';
 import { vcpu } from '@/format';
 import AsyncValue from '@/components/AsyncValue.vue';
 import InfoHint from '@/components/InfoHint.vue';
+import AwsLink from '@/components/AwsLink.vue';
 import PageHeader from '@/components/PageHeader.vue';
+import { aws } from '@/aws-links';
 import SectionCard from '@/components/SectionCard.vue';
 import { useAuthStore } from '@/stores/auth';
 
@@ -849,6 +851,10 @@ function removeCluster(cluster: ComputeCluster): void {
                       <span v-if="selected.provisioned_at" class="text-grey-7 q-ml-sm">
                         {{ new Date(selected.provisioned_at).toLocaleString() }}
                       </span>
+                      <!-- Container instances, placement failures and the
+                           capacity provider's own view are ECS's. Absent until
+                           the cluster exists, which is what the state says. -->
+                      <AwsLink :href="aws.ecsCluster(selected.cluster_arn)" class="q-ml-sm" />
                     </td>
                   </tr>
                   <tr v-if="selected.image_id">

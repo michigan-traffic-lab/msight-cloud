@@ -3,7 +3,9 @@ import { computed, onUnmounted, ref } from 'vue';
 import { useQuasar, type QTableColumn } from 'quasar';
 import { api, type LogGroupsResponse, type LogQueryResults } from '@/api/client';
 import { useAsyncValue } from '@/composables/useAsyncValue';
+import AwsLink from '@/components/AwsLink.vue';
 import PageHeader from '@/components/PageHeader.vue';
+import { aws } from '@/aws-links';
 import AsyncValue from '@/components/AsyncValue.vue';
 import SectionCard from '@/components/SectionCard.vue';
 
@@ -239,6 +241,11 @@ function applyPreset(preset: { query: string }) {
                         · {{ group.retention_days }}d retention
                       </template>
                       <template v-else> · never expires</template>
+                      ·
+                      <!-- Insights answers questions across groups; the
+                           CloudWatch group page is where you read one stream
+                           from end to end. -->
+                      <AwsLink :href="aws.logGroup(group.name)" label="open" />
                     </q-item-label>
                   </q-item-section>
                   <q-item-section v-if="group.orphaned" side>

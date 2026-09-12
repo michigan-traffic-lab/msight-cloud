@@ -20,12 +20,18 @@
  * stops the two from drifting.
  */
 export const VPC_ROUTE_PREFIXES = [
+  // 'alarms' shipped without this line and did exactly what the note above
+  // predicts: /v1/admin/alarms fell to the catch-all, reached the out-of-VPC
+  // function, and answered 404 while sensors and microservices beside it were
+  // fine. Its MCP tools could never have worked.
+  'alarms',
   'apps',
   'clients',
   'clusters',
   'db',
   'github',
   'maps',
+  'mcp-tokens',
   'microservices',
   'sensors',
   'storages',

@@ -400,13 +400,31 @@ describe('one-click GitHub App creation', () => {
     expect(manifest.public).toBe(true);
   });
 
-  it('declares the webhook but leaves it inactive', () => {
-    // The endpoint is not served yet. An App created with live webhooks would
-    // start accruing failed deliveries on the owner's account immediately.
+  /**
+   * Live, now that there is something at the other end.
+   *
+   * This flag is the actual gate on rebuilding from a push: the App is
+   * subscribed to `push` and entitled to it either way, but GitHub delivers
+   * nothing while the webhook is off. It was `false` for as long as the
+   * endpoint was unserved, because an App created with live webhooks starts
+   * accruing failed deliveries on the owner's account immediately.
+   */
+  it('declares the webhook and leaves it active', () => {
     expect(manifest.hook_attributes).toEqual({
       url: 'https://api.example.com/v1/github/webhook',
-      active: false,
+      active: true,
     });
+  });
+
+  /**
+   * The other half of the trigger, and the easier one to lose.
+   *
+   * Without `push` in default_events the App is never sent anything to act on,
+   * and the failure is silent: the webhook is configured, the endpoint is
+   * healthy, and nothing ever arrives.
+   */
+  it('subscribes to push, which is what a rebuild is triggered by', () => {
+    expect(manifest.default_events).toContain('push');
   });
 
   it('exposes both halves of the flow as admin routes', () => {

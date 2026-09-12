@@ -9,9 +9,11 @@ import {
   removeMicroservice,
   updateMicroservice,
 } from '../services/microservices';
+import { listMicroserviceEvents } from '../services/microservice-events';
 import {
   buildMicroservice,
   clearLaunch,
+  handlePushEvent,
   teardownMicroservice,
   clearMicroserviceLogs,
   deployMicroservice,
@@ -220,6 +222,22 @@ const ClearLogsSchema = z.object({
   scope: z.enum(['container', 'build', 'both']).optional(),
 });
 
+/**
+ * What the webhook receiver forwards, once it has verified the signature.
+ *
+ * Validated here rather than trusted, even though the only caller is a Lambda
+ * in this account: the fields came off the public internet, and the receiver's
+ * job was to prove who sent them, not what they say.
+ */
+const PushEventSchema = z.object({
+  repo_full_name: z.string().min(3).max(256),
+  branch: z.string().min(1).max(255),
+  commit_sha: z.string().max(64).nullable().optional(),
+  pusher: z.string().min(1).max(120),
+  message: z.string().max(500).nullable().optional(),
+  delivery_id: z.string().max(120).nullable().optional(),
+});
+
 const UpdateSchema = z.object({
   display_name: z.string().max(200).nullable().optional(),
   repo_id: z.coerce.number().int().positive().optional(),
@@ -233,6 +251,14 @@ const UpdateSchema = z.object({
    * itself is edited on the cluster.
    */
   cluster_name: z.string().max(32).nullable().optional(),
+  /**
+   * Whether a push to the tracked branch rebuilds and redeploys on its own.
+   *
+   * Update-only, and absent means unchanged. Not offered on create because a
+   * service that has never been launched has nothing to redeploy, and the
+   * default — follow the branch — is what almost everyone wants anyway.
+   */
+  auto_deploy: z.boolean().optional(),
   ...SourceFields,
   ...RuntimeFields,
 });
@@ -359,6 +385,57 @@ export function microserviceRoutes(base: string): Router {
   router.post(
     `${base}/microservices/:name/launch/dismiss`,
     async (ctx) => ok({ microservice: await clearLaunch(ctx.params.name) }),
+    operator
+  );
+
+  /**
+   * A push landed on a branch some service builds from.
+   *
+   * Called by the webhook receiver, which has already verified GitHub's
+   * signature and is the only thing that ever calls it — it invokes this
+   * function directly rather than going through the API, because a webhook
+   * carries no Cognito token and could not get past the authorizer.
+   *
+   * Admin-gated all the same. The receiver presents admin, so the gate is not
+   * what stops an outsider — the HMAC is. This is here so that the route cannot
+   * become an unauthenticated way to trigger deployments if it is ever attached
+   * to the API by accident.
+   */
+  router.post(
+    `${base}/microservices/github-push`,
+    async (ctx) => {
+      const input = parseWith(PushEventSchema, readJsonBody(ctx));
+      return ok(
+        await handlePushEvent({
+          repoFullName: input.repo_full_name,
+          branch: input.branch,
+          commitSha: input.commit_sha ?? null,
+          pusher: input.pusher,
+          message: input.message ?? null,
+          deliveryId: input.delivery_id ?? null,
+        })
+      );
+    },
+    admin
+  );
+
+  /**
+   * What has happened to this service, newest first.
+   *
+   * Operator-level, matching every other read on this page: it is a record of
+   * what was done, not a way to do anything.
+   */
+  router.get(
+    `${base}/microservices/:name/events`,
+    async (ctx) => {
+      const limit = Number(ctx.query.limit ?? 50);
+      return ok({
+        events: await listMicroserviceEvents(
+          ctx.params.name,
+          Number.isFinite(limit) ? limit : 50
+        ),
+      });
+    },
     operator
   );
 
@@ -530,6 +607,7 @@ export function microserviceRoutes(base: string): Router {
           scaling: scalingOf(input),
           clusterName: input.cluster_name,
           gpuVramMb: input.gpu_vram_mb,
+          autoDeploy: input.auto_deploy,
           actor: ctx.caller.username,
         })
       );

@@ -62,6 +62,25 @@ const ENTRIES: SettingEntry[] = [
         : { text: 'Not set up', tone: 'warning' },
   },
   {
+    /**
+     * Listed here although it lives on the MCP page.
+     *
+     * Issuing a credential is a setting, and somebody looking for "where do I
+     * revoke that token" will look here first. Pointing at the existing page
+     * rather than duplicating the table keeps one place where a token is made
+     * and the instructions for using it are side by side.
+     */
+    key: 'mcp',
+    label: 'MCP access tokens',
+    description:
+      'Long-lived credentials for AI assistants connecting to this deployment. Each carries ' +
+      'its own role and is revoked on its own, independently of the person who issued it.',
+    icon: 'key',
+    route: 'mcp',
+    minRole: 'operator',
+    status: () => ({ text: 'Manage', tone: 'grey-6' }),
+  },
+  {
     key: 'users',
     label: 'Users and roles',
     description:

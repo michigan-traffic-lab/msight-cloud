@@ -409,7 +409,47 @@ export async function ensureMicroserviceSchema(db: Queryable): Promise<void> {
       ADD COLUMN IF NOT EXISTS launch_detail       TEXT NULL,
       ADD COLUMN IF NOT EXISTS launch_requested_by TEXT NULL,
       ADD COLUMN IF NOT EXISTS launch_requested_at TIMESTAMPTZ NULL,
-      ADD COLUMN IF NOT EXISTS launch_finished_at  TIMESTAMPTZ NULL
+      ADD COLUMN IF NOT EXISTS launch_finished_at  TIMESTAMPTZ NULL,
+      -- 'launch' the first time, 'rebuild' every time after. Decided when the
+      -- launch is claimed, by whether an ECS service already exists, and kept
+      -- so the console can say "Rebuilding" rather than "Launching" over a
+      -- service that is up and serving traffic throughout.
+      ADD COLUMN IF NOT EXISTS launch_kind         TEXT NOT NULL DEFAULT 'launch',
+      -- 'console' | 'push'. What asked for it, as opposed to who: a push has no
+      -- console user, and "did a commit cause this" is the first question asked
+      -- of an unexpected deployment.
+      ADD COLUMN IF NOT EXISTS launch_trigger      TEXT NOT NULL DEFAULT 'console'
+  `);
+
+  /**
+   * Whether a push to the tracked branch rebuilds and redeploys on its own.
+   *
+   * Defaults to on, because a service wired to a branch is almost always meant
+   * to follow it. Off is for the service whose image takes twenty minutes to
+   * build, or that is pinned to a known-good commit while something is being
+   * investigated — cases where an automatic deploy is the wrong answer and the
+   * only alternative would be uninstalling the App from the repository.
+   */
+  await db.query(`
+    ALTER TABLE microservice_clusters
+      ADD COLUMN IF NOT EXISTS auto_deploy BOOLEAN NOT NULL DEFAULT TRUE
+  `);
+
+  /**
+   * Serves the webhook, which arrives knowing a repository and a branch and
+   * nothing else, and must turn that into the services to rebuild.
+   *
+   * Not unique, and distinct from `microservice_clusters_source_idx` above,
+   * which is unique over (repo_id, branch, dockerfile_path). A monorepo backs
+   * several services from one branch — one Dockerfile each — and a push
+   * rebuilds all of them, so this one has to allow the duplicates that one
+   * forbids. The names have to differ too: `IF NOT EXISTS` matches on name
+   * alone, so reusing it would silently create nothing and leave the lookup
+   * unindexed.
+   */
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS microservice_clusters_repo_branch_idx
+      ON microservice_clusters (repo_full_name, branch)
   `);
 
   /**
@@ -423,6 +463,52 @@ export async function ensureMicroserviceSchema(db: Queryable): Promise<void> {
     CREATE INDEX IF NOT EXISTS microservice_clusters_launch_idx
       ON microservice_clusters (launch_state)
       WHERE launch_state IN ('requested', 'provisioning', 'building', 'deploying')
+  `);
+
+  /**
+   * What has happened to each microservice, in order.
+   *
+   * The console could already show what a service *is* — its build state, its
+   * ECS events, its rollout — but nothing that survived the next change. ECS
+   * keeps its service events for an hour or so and CodeBuild its builds; what
+   * neither answers is "when did this last deploy, what commit was it, and who
+   * or what asked for it", which is the first question after an unexpected
+   * change in behaviour. Now that a push can deploy with nobody watching, that
+   * question has no other answer at all.
+   *
+   * Deliberately append-only and deliberately denormalised: the commit and tag
+   * are copied in rather than joined to the service row, because the row moves
+   * on and the point of a history is to say what was true at the time.
+   */
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS microservice_events (
+      id           BIGSERIAL PRIMARY KEY,
+      -- Cascades: a removed service's history is not something anyone can act
+      -- on, and keeping it would strand rows naming a service that is gone.
+      microservice TEXT        NOT NULL
+        REFERENCES microservice_clusters(name) ON DELETE CASCADE,
+      at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      -- 'launch' | 'rebuild' | 'build_started' | 'build_succeeded'
+      -- | 'build_failed' | 'deployed' | 'deploy_failed' | 'restarted'
+      -- | 'rolled_back' | 'push_ignored'
+      kind         TEXT        NOT NULL,
+      -- A console username, or 'push:<github-login>' for a webhook.
+      actor        TEXT        NOT NULL,
+      -- 'console' | 'push' | 'reconcile'.
+      trigger      TEXT        NOT NULL DEFAULT 'console',
+      detail       TEXT        NULL,
+      commit_sha   TEXT        NULL,
+      image_tag    TEXT        NULL,
+      build_id     TEXT        NULL
+    )
+  `);
+
+  /**
+   * Serves the only query this table has: one service's history, newest first.
+   */
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS microservice_events_service_idx
+      ON microservice_events (microservice, at DESC)
   `);
 
   /**
@@ -447,6 +533,76 @@ export async function ensureMicroserviceSchema(db: Queryable): Promise<void> {
       ADD COLUMN IF NOT EXISTS image_resolved_at      TIMESTAMPTZ NULL,
       ADD COLUMN IF NOT EXISTS provision_detail       TEXT NULL,
       ADD COLUMN IF NOT EXISTS provisioned_at         TIMESTAMPTZ NULL
+  `);
+
+  /**
+   * Long-lived tokens for the MCP endpoint.
+   *
+   * The console signs in with Cognito and gets an ID token good for an hour,
+   * which is right for a browser and unusable for a desktop MCP client: that
+   * configuration is a file on disk, read once at startup, with nowhere to put
+   * a refresh. A token pasted there is dead before it is first used twice.
+   *
+   * So MCP gets its own credential — issued here, revocable here, and carrying
+   * a role rather than borrowing a person's. What is stored is a SHA-256 of the
+   * token and never the token itself: a leak of this table is a leak of hashes,
+   * and the plaintext exists exactly once, in the response that created it.
+   *
+   * `role` is copied from the issuer at creation and cannot exceed what they
+   * held. It is what the endpoint authorises against, so a token is a
+   * capability in its own right rather than an impersonation of its author —
+   * which is what makes revoking one safe and obvious.
+   */
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS mcp_tokens (
+      -- SHA-256 hex of the token. The primary key, because the only lookup
+      -- this table ever serves is "is this token real", by hash.
+      token_hash  TEXT PRIMARY KEY,
+      -- Shown in the console so a token can be recognised without seeing it.
+      name        TEXT        NOT NULL,
+      -- 'admin' | 'operator' | 'viewer', at or below the issuer's own.
+      role        TEXT        NOT NULL,
+      -- The first characters of the token, for matching a row to a config file
+      -- without storing anything that could be used to authenticate.
+      hint        TEXT        NOT NULL,
+      created_by  TEXT        NOT NULL,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      -- Null means it does not expire, which is a deliberate choice for a
+      -- credential in a config file nobody will come back to.
+      expires_at  TIMESTAMPTZ NULL,
+      -- Recorded on use, so an unused token can be found and removed. Written
+      -- at most once a minute; see the service for why it is not every call.
+      last_used_at TIMESTAMPTZ NULL,
+      revoked_at  TIMESTAMPTZ NULL
+    )
+  `);
+
+  /**
+   * Serves the console's list, which is ordered by age and hides nothing.
+   *
+   * Revoked rows are kept rather than deleted: "this token was revoked on
+   * Tuesday" is the answer to a question that gets asked after an incident,
+   * and a deleted row answers nothing.
+   */
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS mcp_tokens_created_idx
+      ON mcp_tokens (created_at DESC)
+  `);
+
+  /**
+   * A name identifies at most one live token.
+   *
+   * The console revokes by name — the hash is the one thing it never holds — so
+   * two live tokens sharing a name would make "revoke this row" ambiguous, and
+   * would silently revoke both. Partial rather than a plain UNIQUE, because a
+   * revoked row keeps its name forever and would otherwise burn it: once
+   * "rusheng-laptop" is revoked, the replacement should be allowed to be called
+   * "rusheng-laptop" too.
+   */
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS mcp_tokens_live_name_idx
+      ON mcp_tokens (name)
+      WHERE revoked_at IS NULL
   `);
 
   // Serves the "what still depends on this installation" check that

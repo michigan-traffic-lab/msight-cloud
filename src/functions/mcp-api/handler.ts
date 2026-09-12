@@ -5,18 +5,49 @@
  * Lambda invocation handles one POST /mcp request, which is the stateless
  * model Streamable HTTP is designed for.
  *
- * Auth is handled by the API Gateway Cognito JWT authorizer before this
- * function runs. The original Authorization header is forwarded through, so
- * tool calls can forward it to the admin API without re-signing or re-minting.
+ * Auth happens before this function runs, in a Lambda authorizer that checks a
+ * long-lived MCP token against the table that issued it. The token arrives in
+ * `X-Msight-Token` rather than `Authorization`, and that is not a style choice:
+ * `mcp-remote`, which is how a desktop client reaches an HTTP MCP server,
+ * attaches its own OAuth provider to the transport and that provider overwrites
+ * the Authorization header on every request — a token passed as
+ * `--header Authorization:Bearer …` arrives as the bare string "Bearer ". Any
+ * other header name survives intact.
+ *
+ * ## Why this calls a Lambda rather than an HTTP API
+ *
+ * The caller holds an MCP token, not a Cognito JWT, so there is nothing to
+ * forward to the admin API — its authorizer would refuse it, correctly. Every
+ * admin path these tools use is served by the in-VPC function, so this invokes
+ * that function directly and hands it the role the authorizer resolved.
+ *
+ * That keeps one credential in play instead of two. The alternative — a service
+ * identity in Cognito whose password this function holds — would mean a
+ * standing admin credential that every MCP request authenticates with, and the
+ * role check below would be the only thing standing between a viewer's token
+ * and it.
  *
  * Read tools are available to any signed-in user. Write tools (restart,
  * rollback, suppress) require the admin role, checked by reading the claims
  * API Gateway already validated.
  */
 
-import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
+import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
+import type {
+  APIGatewayProxyEventV2WithLambdaAuthorizer,
+  APIGatewayProxyResultV2,
+} from 'aws-lambda';
 
-const ADMIN_API_URL = process.env.ADMIN_API_URL!;
+const ADMIN_FUNCTION_NAME = process.env.ADMIN_VPC_API_FUNCTION_NAME!;
+
+const lambda = new LambdaClient({});
+
+/** What the authorizer resolved from the presented token. */
+interface McpAuthContext {
+  role: string;
+  tokenName: string;
+  createdBy: string;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // JSON-RPC 2.0 types
@@ -41,15 +72,16 @@ function err(id: string | number | null | undefined, code: number, message: stri
 // Auth helpers
 // ────────────────────────────────────────────────────────────────────────────
 
-function roleFrom(claims: Record<string, unknown>): 'admin' | 'operator' | 'viewer' {
-  const raw = claims['cognito:groups'];
-  const groups: string[] = Array.isArray(raw)
-    ? (raw as string[])
-    : typeof raw === 'string'
-      ? raw.split(',')
-      : [];
-  if (groups.includes('admin')) return 'admin';
-  if (groups.includes('operator')) return 'operator';
+/**
+ * The role carried by the token, defaulting to the least it could be.
+ *
+ * An unrecognised value reads as 'viewer' rather than throwing: the authorizer
+ * has already decided this caller is allowed in, and the safe reading of a
+ * malformed role is the one that can do least.
+ */
+function roleFrom(context: Partial<McpAuthContext> | undefined): 'admin' | 'operator' | 'viewer' {
+  const role = context?.role;
+  if (role === 'admin' || role === 'operator') return role;
   return 'viewer';
 }
 
@@ -222,17 +254,86 @@ function toolsForRole(role: 'admin' | 'operator' | 'viewer') {
 // Admin API proxy
 // ────────────────────────────────────────────────────────────────────────────
 
-async function adminFetch(path: string, method: string, token: string, body?: unknown): Promise<unknown> {
-  const response = await fetch(`${ADMIN_API_URL}${path}`, {
-    method,
-    headers: {
-      authorization: token,
-      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+/**
+ * Calls the in-VPC admin function as the MCP token's role.
+ *
+ * The event is shaped like the one API Gateway would have delivered, with the
+ * claims the admin function's own middleware reads. That middleware resolves a
+ * role from `cognito:groups` and refuses anyone holding none, so passing the
+ * token's role there means the admin function applies exactly the same rules to
+ * an MCP caller as to a console user — no second authorization model, and no
+ * route that trusts this function more than it trusts a browser.
+ *
+ * `cognito:username` carries the token's name rather than a person's, so an
+ * action taken through MCP is attributable to the credential that took it.
+ */
+async function adminCall(
+  path: string,
+  method: string,
+  auth: { role: string; tokenName: string },
+  body?: unknown
+): Promise<unknown> {
+  const [rawPath, rawQuery] = path.split('?');
+  const query: Record<string, string> = {};
+  if (rawQuery) {
+    for (const [key, value] of new URLSearchParams(rawQuery)) query[key] = value;
+  }
+
+  const event = {
+    version: '2.0',
+    routeKey: `${method} ${rawPath}`,
+    rawPath,
+    rawQueryString: rawQuery ?? '',
+    headers: { 'content-type': 'application/json' },
+    ...(rawQuery ? { queryStringParameters: query } : {}),
+    requestContext: {
+      http: { method, path: rawPath, sourceIp: 'mcp', protocol: 'HTTP/1.1', userAgent: 'mcp-api' },
+      authorizer: {
+        jwt: {
+          claims: {
+            'cognito:groups': [auth.role],
+            'cognito:username': `mcp:${auth.tokenName}`,
+          },
+          scopes: [],
+        },
+      },
+      requestId: `mcp-${Date.now()}`,
     },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-  });
-  const text = await response.text();
-  return text ? JSON.parse(text) : {};
+    isBase64Encoded: false,
+  };
+
+  const result = await lambda.send(
+    new InvokeCommand({
+      FunctionName: ADMIN_FUNCTION_NAME,
+      Payload: Buffer.from(JSON.stringify(event)),
+    })
+  );
+
+  if (result.FunctionError) {
+    throw new Error(`The admin function failed: ${result.FunctionError}`);
+  }
+
+  const raw = result.Payload ? Buffer.from(result.Payload).toString('utf8') : '';
+  const response = raw ? (JSON.parse(raw) as { statusCode?: number; body?: string }) : {};
+  const parsed = response.body ? JSON.parse(response.body) : {};
+
+  /**
+   * A non-2xx is raised, not returned.
+   *
+   * The tool layer turns a thrown error into a JSON-RPC error the client can
+   * show; returning the payload would hand the model a 403 body and let it
+   * report it as data.
+   */
+  if ((response.statusCode ?? 500) >= 400) {
+    const message =
+      typeof parsed === 'object' && parsed !== null && 'message' in parsed
+        ? String((parsed as { message: unknown }).message)
+        : `request failed with ${response.statusCode}`;
+    throw new Error(message);
+  }
+
+  return parsed;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -242,40 +343,40 @@ async function adminFetch(path: string, method: string, token: string, body?: un
 async function executeTool(
   name: string,
   args: Record<string, unknown>,
-  token: string,
+  auth: { role: string; tokenName: string },
   role: 'admin' | 'operator' | 'viewer'
 ): Promise<unknown> {
   const enc = (s: string) => encodeURIComponent(s);
 
   switch (name) {
     case 'list_microservices':
-      return adminFetch('/v1/admin/microservices', 'GET', token);
+      return adminCall('/v1/admin/microservices', 'GET', auth);
 
     case 'get_microservice_status':
-      return adminFetch(`/v1/admin/microservices/${enc(String(args.name))}/status`, 'GET', token);
+      return adminCall(`/v1/admin/microservices/${enc(String(args.name))}/status`, 'GET', auth);
 
     case 'get_microservice_logs': {
       const source = args.source === 'build' ? 'build' : 'container';
       const limit = args.limit ? Math.min(Math.trunc(Number(args.limit)), 500) : 100;
-      return adminFetch(
+      return adminCall(
         `/v1/admin/microservices/${enc(String(args.name))}/logs?source=${source}&limit=${limit}`,
         'GET',
-        token
+        auth
       );
     }
 
     case 'get_microservice_metrics':
-      return adminFetch(`/v1/admin/microservices/${enc(String(args.name))}/metrics`, 'GET', token);
+      return adminCall(`/v1/admin/microservices/${enc(String(args.name))}/metrics`, 'GET', auth);
 
     case 'list_microservice_images':
-      return adminFetch(`/v1/admin/microservices/${enc(String(args.name))}/images`, 'GET', token);
+      return adminCall(`/v1/admin/microservices/${enc(String(args.name))}/images`, 'GET', auth);
 
     case 'list_microservice_builds': {
       const limit = args.limit ? Math.min(Math.trunc(Number(args.limit)), 50) : 10;
-      return adminFetch(
+      return adminCall(
         `/v1/admin/microservices/${enc(String(args.name))}/builds?limit=${limit}`,
         'GET',
-        token
+        auth
       );
     }
 
@@ -284,32 +385,32 @@ async function executeTool(
       if (args.state) qs.set('state', String(args.state));
       if (args.prefix) qs.set('prefix', String(args.prefix));
       const q = qs.toString();
-      return adminFetch(`/v1/admin/alarms${q ? `?${q}` : ''}`, 'GET', token);
+      return adminCall(`/v1/admin/alarms${q ? `?${q}` : ''}`, 'GET', auth);
     }
 
     case 'get_clients_summary':
-      return adminFetch('/v1/admin/clients/summary', 'GET', token);
+      return adminCall('/v1/admin/clients/summary', 'GET', auth);
 
     case 'list_sensors':
-      return adminFetch('/v1/admin/sensors', 'GET', token);
+      return adminCall('/v1/admin/sensors', 'GET', auth);
 
     case 'restart_microservice':
       if (role !== 'admin') throw new Error('Admin role required to restart a microservice.');
-      return adminFetch(`/v1/admin/microservices/${enc(String(args.name))}/restart`, 'POST', token);
+      return adminCall(`/v1/admin/microservices/${enc(String(args.name))}/restart`, 'POST', auth);
 
     case 'rollback_microservice':
       if (role !== 'admin') throw new Error('Admin role required to roll back a microservice.');
-      return adminFetch(`/v1/admin/microservices/${enc(String(args.name))}/rollback`, 'POST', token, {
+      return adminCall(`/v1/admin/microservices/${enc(String(args.name))}/rollback`, 'POST', auth, {
         image_tag: String(args.image_tag),
       });
 
     case 'suppress_alarm':
       if (role !== 'admin') throw new Error('Admin role required to suppress an alarm.');
-      return adminFetch(`/v1/admin/alarms/${enc(String(args.name))}/suppress`, 'POST', token);
+      return adminCall(`/v1/admin/alarms/${enc(String(args.name))}/suppress`, 'POST', auth);
 
     case 'unsuppress_alarm':
       if (role !== 'admin') throw new Error('Admin role required to unsuppress an alarm.');
-      return adminFetch(`/v1/admin/alarms/${enc(String(args.name))}/unsuppress`, 'POST', token);
+      return adminCall(`/v1/admin/alarms/${enc(String(args.name))}/unsuppress`, 'POST', auth);
 
     default:
       throw new Error(`Unknown tool: ${name}`);
@@ -321,12 +422,40 @@ async function executeTool(
 // ────────────────────────────────────────────────────────────────────────────
 
 export async function handler(
-  event: APIGatewayProxyEventV2WithJWTAuthorizer
+  event: APIGatewayProxyEventV2WithLambdaAuthorizer<McpAuthContext>
 ): Promise<APIGatewayProxyResultV2> {
-  const claims = event.requestContext.authorizer.jwt.claims as Record<string, unknown>;
-  const role = roleFrom(claims);
-  const token =
-    event.headers['authorization'] ?? event.headers['Authorization'] ?? '';
+  /**
+   * Streamable HTTP offers two optional extras this server does not implement.
+   *
+   * GET /mcp opens a server-initiated SSE stream and DELETE /mcp ends a
+   * session; this server is stateless — one request per invocation — and has
+   * neither. The spec says a server that does not offer them answers 405, and
+   * the distinction matters to a client: 405 means "that feature is not on
+   * offer", while the 404 an unrouted path produces means "wrong address", and
+   * sends the client hunting for an endpoint that never existed.
+   */
+  const method = event.requestContext.http.method.toUpperCase();
+  if (method !== 'POST') {
+    return {
+      statusCode: 405,
+      headers: { 'content-type': 'application/json', allow: 'POST' },
+      body: JSON.stringify(
+        err(null, -32601, `${method} is not supported: this server is stateless and offers no SSE stream.`)
+      ),
+    };
+  }
+
+  /**
+   * Who the caller is, according to the authorizer.
+   *
+   * The token itself never reaches this function — the authorizer compared it
+   * and passed on what it resolved. That is deliberate: the one place a token's
+   * plaintext is handled is the one that has to, and this function can be read
+   * without wondering whether it leaks a credential into a log or a tool call.
+   */
+  const context = event.requestContext.authorizer?.lambda as Partial<McpAuthContext> | undefined;
+  const role = roleFrom(context);
+  const auth = { role, tokenName: context?.tokenName ?? 'unknown' };
   const tools = toolsForRole(role);
 
   let body: JsonRpcRequest | JsonRpcRequest[];
@@ -374,7 +503,7 @@ export async function handler(
         }
 
         try {
-          const result = await executeTool(toolName, toolArgs, token, role);
+          const result = await executeTool(toolName, toolArgs, auth, role);
           responses.push(
             ok(req.id, {
               content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

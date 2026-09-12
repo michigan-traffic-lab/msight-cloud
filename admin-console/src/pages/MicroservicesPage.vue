@@ -316,6 +316,27 @@ const LAUNCH_BADGES: Record<LaunchState, string> = {
   failed: 'launch failed',
 };
 
+/**
+ * The same states over a service that is already up.
+ *
+ * Worth the second table for the same reason the detail page has one: a row
+ * reading "deploying" beside a service that has been serving all week looks
+ * like an outage, and "redeploying" does not.
+ */
+const REBUILD_BADGES: Record<LaunchState, string> = {
+  none: '',
+  requested: 'rebuilding',
+  provisioning: 'rebuilding',
+  building: 'rebuilding',
+  deploying: 'redeploying',
+  running: 'running',
+  failed: 'rebuild failed',
+};
+
+function launchBadge(row: Microservice): string {
+  return (row.launch_kind === 'rebuild' ? REBUILD_BADGES : LAUNCH_BADGES)[row.launch_state];
+}
+
 function reportError(error: unknown, fallback: string): void {
   $q.notify({
     type: 'negative',
@@ -1127,10 +1148,22 @@ async function submitService(): Promise<void> {
                     -->
                     <q-badge v-if="launchInFlight(row.launch_state)" color="info">
                       <q-spinner size="10px" class="q-mr-xs" />
-                      {{ LAUNCH_BADGES[row.launch_state] }}
+                      {{ launchBadge(row) }}
+                      <!--
+                        A rebuild nobody on this page started. Said here because
+                        the list is where an unexpected one is first noticed.
+                      -->
+                      <q-icon
+                        v-if="row.launch_trigger === 'push'"
+                        name="commit"
+                        size="12px"
+                        class="q-ml-xs"
+                      >
+                        <q-tooltip>Triggered by a push to {{ row.branch }}</q-tooltip>
+                      </q-icon>
                     </q-badge>
                     <q-badge v-else-if="row.launch_state === 'failed'" color="negative">
-                      launch failed
+                      {{ launchBadge(row) }}
                     </q-badge>
                     <q-badge v-else-if="buildRunning(row.build_state)" color="info">
                       <q-spinner size="10px" class="q-mr-xs" />building

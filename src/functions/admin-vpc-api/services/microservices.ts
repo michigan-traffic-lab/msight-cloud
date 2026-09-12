@@ -308,6 +308,12 @@ export interface MicroserviceRow {
   launch_requested_by: string | null;
   launch_requested_at: string | null;
   launch_finished_at: string | null;
+  /** Whether this bring-up is the first one or a redeploy over a live service. */
+  launch_kind: LaunchKind;
+  /** What asked for it, as opposed to who. */
+  launch_trigger: LaunchTrigger;
+  /** Whether a push to the tracked branch rebuilds and redeploys on its own. */
+  auto_deploy: boolean;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -340,6 +346,19 @@ export type LaunchState =
   | 'running'
   | 'failed';
 
+/**
+ * Whether a bring-up is the first one or a redeploy over something already up.
+ *
+ * Decided when the launch is claimed and kept for its duration, because the two
+ * look identical in every other column and read completely differently to
+ * someone watching: "Launching" over a service that is up and serving traffic
+ * throughout is simply wrong.
+ */
+export type LaunchKind = 'launch' | 'rebuild';
+
+/** What asked for a launch, as opposed to who. */
+export type LaunchTrigger = 'console' | 'push';
+
 /** The states a launch is still in flight in, and the reconcile picks up. */
 export const LAUNCH_IN_FLIGHT: readonly LaunchState[] = [
   'requested',
@@ -360,6 +379,7 @@ export const COLUMNS = `name, display_name, installation_id, repo_id, repo_full_
                  build_detail, build_commit_sha, build_started_at, build_finished_at,
                  build_log_group, build_log_stream, launch_state, launch_detail,
                  launch_requested_by, launch_requested_at, launch_finished_at,
+                 launch_kind, launch_trigger, auto_deploy,
                  created_by, created_at, updated_at`;
 
 function optionalIso(value: unknown): string | null {
@@ -420,6 +440,12 @@ function toRow(row: Record<string, unknown>): MicroserviceRow {
     launch_requested_by: text(row.launch_requested_by),
     launch_requested_at: optionalIso(row.launch_requested_at),
     launch_finished_at: optionalIso(row.launch_finished_at),
+    launch_kind: (text(row.launch_kind) ?? 'launch') as LaunchKind,
+    launch_trigger: (text(row.launch_trigger) ?? 'console') as LaunchTrigger,
+    // Defaulted true rather than false: the column is NOT NULL DEFAULT TRUE, so
+    // an undefined here means a row read before the column existed, and the
+    // behaviour that row was created expecting is the default one.
+    auto_deploy: row.auto_deploy === undefined ? true : row.auto_deploy !== false,
     created_by: String(row.created_by),
     created_at: new Date(row.created_at as string).toISOString(),
     updated_at: new Date(row.updated_at as string).toISOString(),
@@ -852,6 +878,8 @@ export interface UpdateMicroserviceInput {
   scaling?: ScalingInput | undefined;
   clusterName?: string | null | undefined;
   gpuVramMb?: number | undefined;
+  /** Whether a push to the tracked branch rebuilds and redeploys on its own. */
+  autoDeploy?: boolean | undefined;
   actor: string;
 }
 
@@ -985,6 +1013,10 @@ export async function updateMicroservice(
             scale_in_cooldown = $25,
             cluster_name = $26,
             gpu_vram_mb = $27,
+            -- Absent means unchanged, like every other optional field here. A
+            -- plain COALESCE would not do: false is a value the caller sends on
+            -- purpose, and COALESCE cannot tell it from "not sent".
+            auto_deploy = CASE WHEN $28::boolean THEN $29 ELSE auto_deploy END,
             updated_at = NOW()
       WHERE name = $1
       RETURNING ${COLUMNS}`,
@@ -1016,6 +1048,8 @@ export async function updateMicroservice(
       scaling.scale_in_cooldown,
       clusterName,
       gpuVramMb,
+      input.autoDeploy !== undefined,
+      input.autoDeploy ?? null,
     ]
   );
 

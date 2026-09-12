@@ -6,6 +6,7 @@ import { clientRoutes } from './clients.routes';
 import { clusterRoutes } from './clusters.routes';
 import { githubRoutes } from './github.routes';
 import { mapRoutes } from './maps.routes';
+import { mcpTokenRoutes } from './mcp-tokens.routes';
 import { metricsRoutes } from './metrics.routes';
 import { microserviceRoutes } from './microservices.routes';
 import { sensorRoutes } from './sensors.routes';
@@ -44,5 +45,6 @@ export function buildVpcRouter(apiVersion: string): Router {
     .merge(githubRoutes(base))
     .merge(microserviceRoutes(base))
     .merge(alarmRoutes(base))
-    .merge(metricsRoutes(base));
+    .merge(metricsRoutes(base))
+    .merge(mcpTokenRoutes(base));
 }

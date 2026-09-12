@@ -322,6 +322,28 @@ export interface StorageEntry {
   cost_tracked: boolean;
 }
 
+/**
+ * A credential for the MCP endpoint.
+ *
+ * The token itself is absent, and not by omission: only its hash is stored, so
+ * there is nothing to return. The plaintext exists in exactly one response —
+ * the one that created it.
+ */
+export interface McpToken {
+  name: string;
+  role: AdminRole;
+  /** The first characters of the token, for matching a row to a config file. */
+  hint: string;
+  created_by: string;
+  created_at: string;
+  /** Null never expires, which is the point of the credential. */
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  /** Derived server-side, so the console does not re-implement the comparison. */
+  active: boolean;
+}
+
 export interface StoragesResponse {
   storages: StorageEntry[];
   /** The stack's own console-hosting bucket. Never a sensor target. */
@@ -563,6 +585,12 @@ export interface GithubAppStatus {
   /** What the App is called if the operator does not name it. */
   suggested_app_name: string;
   install_url: string | null;
+  /**
+   * Where GitHub delivers pushes. Shown because an App created before the
+   * receiver existed has its webhook switched off on GitHub's side, and no API
+   * can turn it back on — that one is a checkbox in the App's settings.
+   */
+  webhook_url: string;
 }
 
 /**
@@ -787,6 +815,15 @@ export interface Microservice {
   launch_requested_by: string | null;
   launch_requested_at: string | null;
   launch_finished_at: string | null;
+  /** Whether this bring-up is the first one or a redeploy over a live service. */
+  launch_kind: LaunchKind;
+  /** What asked for it, as opposed to who. */
+  launch_trigger: LaunchTrigger;
+  /**
+   * Whether a push to the tracked branch rebuilds and redeploys on its own.
+   * On by default: a service wired to a branch is usually meant to follow it.
+   */
+  auto_deploy: boolean;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -832,16 +869,65 @@ export function launchInFlight(state: LaunchState): boolean {
   );
 }
 
+/**
+ * Whether a bring-up is the first one or a redeploy over something already up.
+ *
+ * The states are identical either way; what differs is what is true while they
+ * run. A rebuild keeps serving from the old image until the new one is
+ * deployed, so calling it "Launching" would be simply wrong.
+ */
+export type LaunchKind = 'launch' | 'rebuild';
+
+/** What asked for a launch: someone in the console, or a push to the branch. */
+export type LaunchTrigger = 'console' | 'push';
+
 /** Where a launch got to, and what it did on the way. */
 export interface LaunchStatus {
   name: string;
   launch_state: LaunchState;
   launch_detail: string | null;
+  launch_kind: LaunchKind;
+  launch_trigger: LaunchTrigger;
   provision_state: ProvisionState;
   build_state: BuildState;
   steps: string[];
   error: string | null;
 }
+
+/**
+ * One thing that happened to a microservice.
+ *
+ * Everything else the console shows about a service is a snapshot that the next
+ * change overwrites. This is the record that survives it — and the only place
+ * a deployment can be traced back to the commit that caused it, which matters
+ * now that a push can deploy with nobody watching.
+ */
+export interface MicroserviceEvent {
+  id: string;
+  microservice: string;
+  at: string;
+  kind: MicroserviceEventKind;
+  /** A console username, or `push:<github-login>` for a webhook. */
+  actor: string;
+  trigger: LaunchTrigger | 'reconcile';
+  detail: string | null;
+  commit_sha: string | null;
+  image_tag: string | null;
+  build_id: string | null;
+}
+
+export type MicroserviceEventKind =
+  | 'launch'
+  | 'rebuild'
+  | 'build_started'
+  | 'build_succeeded'
+  | 'build_failed'
+  | 'deployed'
+  | 'deploy_failed'
+  | 'restarted'
+  | 'rolled_back'
+  /** A push arrived for a service with automatic deployment turned off. */
+  | 'push_ignored';
 
 /** One entry from the server-held instance catalog. */
 export interface InstanceType {
@@ -1286,6 +1372,32 @@ export const api = {
   appRemove: (appId: string) =>
     request<{ removed: boolean }>('DELETE', `/v1/admin/apps/${encodeURIComponent(appId)}`),
 
+  // ── MCP access tokens ───────────────────────────────────────────────────
+
+  mcpTokens: (signal?: AbortSignal) =>
+    request<{ tokens: McpToken[] }>('GET', '/v1/admin/mcp-tokens', undefined, signal),
+
+  /**
+   * Issues a token. The plaintext comes back once and is never recoverable —
+   * the caller must show it immediately and say so.
+   */
+  mcpTokenCreate: (input: {
+    name: string;
+    role?: AdminRole;
+    expires_in_days?: number | null;
+  }) =>
+    request<{ token: string; token_shown_once: boolean; mcp_token: McpToken }>(
+      'POST',
+      '/v1/admin/mcp-tokens',
+      input
+    ),
+
+  mcpTokenRevoke: (name: string) =>
+    request<{ mcp_token: McpToken }>(
+      'DELETE',
+      `/v1/admin/mcp-tokens/${encodeURIComponent(name)}`
+    ),
+
   storages: (signal?: AbortSignal) =>
     request<StoragesResponse>('GET', '/v1/admin/storages', undefined, signal),
 
@@ -1571,6 +1683,8 @@ export const api = {
     changes: {
       display_name?: string | null;
       repo_id?: number;
+      /** Absent leaves it as it is; false is a value, not an omission. */
+      auto_deploy?: boolean;
     } & MicroserviceSource &
       MicroserviceRuntime
   ) =>
@@ -1660,6 +1774,22 @@ export const api = {
    */
   microserviceLaunch: (name: string) =>
     request<LaunchStatus>('POST', `/v1/admin/microservices/${encodeURIComponent(name)}/launch`),
+
+  /**
+   * What has happened to this service, newest first.
+   *
+   * The one view that outlives the thing it describes: ECS keeps its service
+   * events for about an hour and the registry row only ever holds the latest
+   * state, so without this there is no way to ask when a service last deployed
+   * or what commit it was running before today.
+   */
+  microserviceEvents: (name: string, limit = 50, signal?: AbortSignal) =>
+    request<{ events: MicroserviceEvent[] }>(
+      'GET',
+      `/v1/admin/microservices/${encodeURIComponent(name)}/events?limit=${limit}`,
+      undefined,
+      signal
+    ),
 
   /** Stops waiting on a launch. Changes nothing AWS has. */
   microserviceLaunchDismiss: (name: string) =>

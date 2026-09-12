@@ -8,7 +8,9 @@ import {
   type AuroraTablesResponse,
 } from '@/api/client';
 import { useAsyncValue } from '@/composables/useAsyncValue';
+import AwsLink from '@/components/AwsLink.vue';
 import PageHeader from '@/components/PageHeader.vue';
+import { aws } from '@/aws-links';
 import AsyncValue from '@/components/AsyncValue.vue';
 import { useAuthStore } from '@/stores/auth';
 import SectionCard from '@/components/SectionCard.vue';
@@ -314,6 +316,13 @@ const queryColumns = computed<QTableColumn[]>(() =>
       subtitle="Browse the public schema, edit the fields that are safe to edit, and run read-only queries."
     >
       <template #actions>
+        <!--
+          Metrics, parameter groups, snapshots and the scaling history live only
+          in RDS. Linked to the database list rather than the cluster: this
+          console holds an endpoint, not an identifier, and one cannot be
+          derived from the other without asking RDS.
+        -->
+        <AwsLink :href="aws.rdsDatabases()" button label="RDS console" />
         <q-btn
           outline
           color="primary"

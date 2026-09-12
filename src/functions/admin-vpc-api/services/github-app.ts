@@ -9,7 +9,11 @@ import {
   ensureMicroserviceSchema,
   INSTALL_INTENT_TTL_SECONDS,
 } from '../../../shared/microservice-schema';
-import type { GithubRepoInfo } from '../../../shared/github/rpc';
+import type {
+  GithubAppIdentity,
+  GithubRepoInfo,
+  ManifestConversion,
+} from '../../../shared/github/rpc';
 import { getPool } from './db';
 import {
   convertManifest,
@@ -143,6 +147,15 @@ export interface GithubAppStatus {
   app_delete_url: string | null;
   install_url: string | null;
   /**
+   * Where GitHub delivers pushes for this deployment.
+   *
+   * Surfaced because it has to be checked by hand on an App created before the
+   * receiver existed: such an App has `active: false` stored on GitHub's side,
+   * and there is no API that can change it — `PATCH /app/hook/config` covers
+   * the URL, content type and secret but not that flag.
+   */
+  webhook_url: string;
+  /**
    * What the App would be called if the operator does not name it. Sent so the
    * connect form can show it as a placeholder without the console having to
    * know the deployment name or re-derive the rule.
@@ -159,6 +172,9 @@ export async function appStatus(): Promise<GithubAppStatus> {
     app_settings_url: app ? appSettingsUrl(app) : null,
     app_delete_url: app ? `${appSettingsUrl(app)}/advanced` : null,
     install_url: app ? `https://github.com/apps/${app.slug}/installations/new` : null,
+    // Defaulted rather than required for the same reason as the name below:
+    // this is display material, and appStatus must not fail over it.
+    webhook_url: process.env.GITHUB_WEBHOOK_URL ?? '',
     // Defaulted rather than required: this is a label, and appStatus must not
     // fail just because the deployment name is unset.
     suggested_app_name: manifestAppName(process.env.DEPLOYMENT_NAME ?? 'msight'),
@@ -216,13 +232,18 @@ export function buildManifest(input: {
     description:
       'Builds microservices for a self-hosted MSight cloud deployment. Reads repository ' +
       'contents to find Dockerfiles; makes no changes to any repository.',
-    // `active: false` is the real gate on auto-rebuild, not the permissions —
-    // the App is subscribed to `push` and entitled to it, but GitHub delivers
-    // nothing while the webhook is off. Off until the receiver exists, because
-    // an App created with live webhooks starts accruing failed deliveries on
-    // the owner's account immediately. Unlike a permission, this is a plain
-    // setting: flipping it needs no re-consent from anyone.
-    hook_attributes: { url: input.webhookUrl, active: false },
+    // `active` is the real gate on auto-rebuild, not the permissions — the App
+    // is subscribed to `push` and entitled to it, but GitHub delivers nothing
+    // while the webhook is off. On now that the receiver exists: it verifies
+    // every delivery's HMAC and rebuilds whatever the pushed branch feeds.
+    //
+    // Applies to Apps created from this manifest only. An App created before
+    // the receiver existed has `active: false` stored on GitHub's side, and
+    // there is no API to change it — `PATCH /app/hook/config` covers the URL,
+    // content type and secret but not this flag. That one has to be ticked by
+    // hand in the App's settings, which is what the console's GitHub page now
+    // says.
+    hook_attributes: { url: input.webhookUrl, active: true },
     // Where GitHub sends the temporary code after creating the App, and where
     // it sends the browser after an install. Both point at the static console,
     // which then calls the admin API with a Cognito token — a GitHub redirect
@@ -431,6 +452,79 @@ export async function createManifestIntent(input: {
  * credentials under them would leave every `github_installations` row naming a
  * grant issued to a different App, which authenticates but resolves to nothing.
  */
+/**
+ * How long to keep asking GitHub about an App it has just created.
+ *
+ * `GET /app` 404s with "Integration not found" for a second or two after a
+ * manifest conversion — the App exists, its credentials work, and GitHub has
+ * simply not published it to that endpoint yet. Observed at roughly two
+ * seconds; this allows seven, spread over four attempts, which is well inside
+ * both the Lambda's timeout and a person's patience while a browser waits.
+ */
+const FRESH_APP_ATTEMPT_DELAYS_MS = [0, 1000, 2000, 4000];
+
+/**
+ * Reads back the identity of an App created seconds ago.
+ *
+ * This exists because the obvious code — create it, then read it — is a race
+ * that GitHub loses, and it loses it every time rather than occasionally. The
+ * symptom was that creating an App through the one-click flow reported "Could
+ * not connect: GitHub has no such resource (reading the App identity)" while
+ * the App sat perfectly healthy on GitHub, its private key already in Secrets
+ * Manager and its webhook already firing. The row was never written, so the
+ * console then said the deployment was not configured at all.
+ *
+ * Only a 404 is retried. Every other refusal — a bad key, a suspended owner,
+ * rate limiting — means what it says and is raised immediately, because
+ * retrying those would turn a clear error into a slow one.
+ *
+ * If GitHub still has not published it, the App is recorded anyway from the
+ * manifest conversion, which is not a guess: it is GitHub's own description of
+ * the App, returned by the same exchange that produced the private key. The
+ * alternative is to fail after having already stored a working credential,
+ * which leaves the deployment in the exact half-created state this flow exists
+ * to avoid. Anything stale is corrected by the console's refresh-identity path.
+ */
+export async function verifyFreshApp(created: ManifestConversion): Promise<GithubAppIdentity> {
+  let lastError: unknown = null;
+
+  for (const [attempt, delay] of FRESH_APP_ATTEMPT_DELAYS_MS.entries()) {
+    if (delay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+
+    try {
+      return await verifyApp();
+    } catch (error) {
+      const status = error instanceof HttpError ? error.status : null;
+      if (status !== 404) {
+        throw error;
+      }
+      lastError = error;
+      console.warn('github app not published yet, retrying', {
+        appId: created.app_id,
+        attempt: attempt + 1,
+      });
+    }
+  }
+
+  console.warn('github app never appeared on GET /app; recording it from the manifest', {
+    appId: created.app_id,
+    lastError: lastError instanceof Error ? lastError.message : String(lastError),
+  });
+
+  return {
+    app_id: created.app_id,
+    slug: created.slug,
+    name: created.name,
+    html_url: created.html_url,
+    owner_login: created.owner_login,
+    owner_type: created.owner_type,
+    permissions: created.permissions,
+    events: created.events,
+  };
+}
+
 export async function completeManifest(input: {
   code: string;
   state: string;
@@ -471,7 +565,7 @@ export async function completeManifest(input: {
   // Same order as saveApp, for the same reason: prove the stored key works
   // before recording the App, so a failure leaves the console saying "not
   // configured" rather than showing a connection that cannot mint a token.
-  const identity = await verifyApp();
+  const identity = await verifyFreshApp(created);
 
   const pool = await getPool();
   const { rows } = await pool.query(
