@@ -97,17 +97,17 @@ const ROLE_CHOICES: { label: string; value: AdminRole; what: string }[] = [
   {
     label: 'Viewer',
     value: 'viewer',
-    what: 'Read-only tools: service status, logs, metrics, alarms, sensors.',
+    what: 'Read-only: service status, logs, metrics, alarms, sensors, maps.',
   },
   {
     label: 'Operator',
     value: 'operator',
-    what: 'The same tools as viewer today — no tool has an operator floor.',
+    what: 'Adds the day-to-day repairs — restart, dismiss a launch, re-check a source, read data and query logs.',
   },
   {
     label: 'Admin',
     value: 'admin',
-    what: 'Adds restart, rollback, and alarm suppression. Give this out sparingly.',
+    what: 'Everything: launch and tear down services, change capacity, edit data, manage users. Give this out sparingly.',
   },
 ];
 
@@ -377,68 +377,55 @@ const geminiCliSteps = [
 // ── Tool list ─────────────────────────────────────────────────────────────
 
 /**
- * Mirrors the tool table in the MCP handler.
+ * What the server exposes, by the role a token carries.
  *
- * Duplicated rather than fetched, because listing tools requires a token and a
- * page whose job is to help you get one cannot demand one first.
+ * Counts and categories rather than eighty names. The question someone asks on
+ * this page is "what will this token let the assistant do", and the answer that
+ * matters is the shape of the set — a connected client can always list the
+ * tools itself, in far more detail than a card could.
+ *
+ * The numbers are pinned by a test against the server's own table. The block
+ * that used to be here was a hand-copied list of thirteen tools that had
+ * drifted to a sixth of the truth without anyone noticing, which is how a
+ * reader concludes the server cannot do something it has done all along.
  */
-const allTools = [
-  { name: 'list_microservices', description: 'List all microservices with state', minRole: null },
+const TOOL_COUNTS: Record<AdminRole, number> = { viewer: 11, operator: 36, admin: 80 };
+
+const TOOL_GROUPS: { label: string; icon: string; what: string }[] = [
   {
-    name: 'get_microservice_status',
-    description: 'Full ECS status, image, and log summary for one service',
-    minRole: null,
+    label: 'Microservices',
+    icon: 'lan',
+    what: 'Inspect, launch, rebuild, deploy, restart, roll back, read logs and metrics, set retention, and tear down.',
   },
   {
-    name: 'get_microservice_logs',
-    description: 'Recent container or build log output',
-    minRole: null,
+    label: 'Sensors',
+    icon: 'sensors',
+    what: 'List, register, enable and disable, change streaming and archive settings, and reconcile.',
   },
   {
-    name: 'get_microservice_metrics',
-    description: 'CPU and memory utilisation over the last 3 hours',
-    minRole: null,
+    label: 'Clusters',
+    icon: 'memory',
+    what: 'List, check health, create, resize, provision and deprovision compute capacity.',
   },
   {
-    name: 'list_microservice_images',
-    description: 'Available ECR image tags for rollback',
-    minRole: null,
+    label: 'Apps and clients',
+    icon: 'group',
+    what: 'Manage app registrations, count connected clients, look one up, and search by radius.',
   },
   {
-    name: 'list_microservice_builds',
-    description: 'Recent CodeBuild history with commit SHA and duration',
-    minRole: null,
+    label: 'Storage',
+    icon: 'inventory_2',
+    what: 'List registered and available buckets, browse objects, register and unregister.',
   },
   {
-    name: 'list_alarms',
-    description: 'CloudWatch alarms, filterable by state or name prefix',
-    minRole: null,
+    label: 'Data',
+    icon: 'storage',
+    what: 'Query Aurora, read and edit rows, and inspect or repair Valkey keys.',
   },
   {
-    name: 'get_clients_summary',
-    description: 'Connected WebSocket client counts by app',
-    minRole: null,
-  },
-  {
-    name: 'list_sensors',
-    description: 'Sensor list with queue depths and consumer status',
-    minRole: null,
-  },
-  {
-    name: 'restart_microservice',
-    description: 'Rolling restart of a deployed service (no downtime)',
-    minRole: 'admin',
-  },
-  {
-    name: 'rollback_microservice',
-    description: 'Deploy a specific previous image tag',
-    minRole: 'admin',
-  },
-  { name: 'suppress_alarm', description: 'Disable alarm actions to silence it', minRole: 'admin' },
-  {
-    name: 'unsuppress_alarm',
-    description: 'Re-enable actions on a suppressed alarm',
-    minRole: 'admin',
+    label: 'Operations',
+    icon: 'monitor_heart',
+    what: 'Alarms, CloudWatch Insights queries, network topology, cost, users, and system info.',
   },
 ];
 </script>
@@ -1016,25 +1003,41 @@ const allTools = [
           title="Available tools"
           lede="What the assistant can do once connected. The floor applies to the token's role, not to yours — an admin who issues a viewer token gets the read-only set in that client."
         >
-          <div class="row q-col-gutter-sm">
-            <div v-for="tool in allTools" :key="tool.name" class="col-12 col-sm-6 col-md-4">
-              <div class="tool-card q-pa-sm rounded-borders">
-                <div class="row items-center q-mb-xs">
-                  <code class="text-caption text-primary">{{ tool.name }}</code>
-                  <q-space />
-                  <q-chip
-                    v-if="tool.minRole === 'admin'"
-                    size="xs"
-                    color="negative"
-                    text-color="white"
-                    dense
-                  >
-                    admin
-                  </q-chip>
+          <!--
+            How many tools each role actually gets. This is the consequence of
+            the choice made in the create dialog, and the number is the part
+            people are surprised by: a viewer token is not "slightly less", it
+            is an eighth of the surface.
+          -->
+          <div class="row q-col-gutter-sm q-mb-md">
+            <div v-for="choice in ROLE_CHOICES" :key="choice.value" class="col-12 col-sm-4">
+              <div class="tool-card q-pa-md rounded-borders">
+                <div class="row items-baseline q-gutter-xs">
+                  <div class="text-h6">{{ TOOL_COUNTS[choice.value] }}</div>
+                  <div class="text-caption text-grey-7">of {{ TOOL_COUNTS.admin }} tools</div>
                 </div>
-                <div class="text-caption text-grey-7">{{ tool.description }}</div>
+                <div class="text-weight-medium q-mt-xs">{{ choice.label }} token</div>
+                <div class="text-caption text-grey-7">{{ choice.what }}</div>
               </div>
             </div>
+          </div>
+
+          <q-list bordered separator class="rounded-borders">
+            <q-item v-for="group in TOOL_GROUPS" :key="group.label">
+              <q-item-section avatar style="min-width: 36px">
+                <q-icon :name="group.icon" color="grey-7" size="20px" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label class="text-weight-medium">{{ group.label }}</q-item-label>
+                <q-item-label caption>{{ group.what }}</q-item-label>
+              </q-item-section>
+            </q-item>
+          </q-list>
+
+          <div class="text-caption text-grey-7 q-mt-sm" style="max-width: 76ch">
+            A connected client lists the tools itself, with full descriptions and argument
+            schemas — ask it what it can do. If a tool you expect is missing, the usual reason
+            is the token's role: the <code>whoami</code> tool reports which one it holds.
           </div>
         </SectionCard>
       </div>

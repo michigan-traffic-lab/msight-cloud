@@ -743,6 +743,343 @@ const TOOLS: ToolDef[] = [
     },
     minRole: 'admin',
   },
+
+  // ── Microservice lifecycle ────────────────────────────────────────────────
+  //
+  // `launch_microservice` is the one that matters. Creating a service and then
+  // building and deploying it are three separate tools above, which mirrors
+  // how the console used to work and not how it works now: launch does the
+  // whole sequence, tolerates every step having already been done, and is what
+  // the console's own primary button calls. Without it an assistant has to
+  // reproduce the sequence by hand and gets the order wrong.
+  {
+    name: 'launch_microservice',
+    description:
+      'Bring a microservice up end to end: create its cluster and scaffolding, build the ' +
+      'image from the tracked branch, and deploy when the build lands. Idempotent — safe to ' +
+      'call on a service that is already up, where it rebuilds and redeploys instead.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+    },
+    minRole: 'admin',
+  },
+  {
+    name: 'dismiss_launch',
+    description:
+      'Stop waiting on a launch that failed, without touching anything AWS has. Clears the ' +
+      'banner only; the service is left exactly as the failure left it.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+    },
+    minRole: 'operator',
+  },
+  {
+    name: 'check_microservice_source',
+    description:
+      'Re-read the repository: confirm the branch exists, the Dockerfile is where it should ' +
+      'be, and record the branch head. Reports a bad result rather than failing on it.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+    },
+    minRole: 'operator',
+  },
+  {
+    name: 'provision_microservice',
+    description:
+      'Create only the scaffolding — image repository, log groups, build project — without ' +
+      'building or deploying. Usually a step of launch_microservice rather than a thing to ' +
+      'call on its own.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+    },
+    minRole: 'admin',
+  },
+  {
+    name: 'deprovision_microservice',
+    description:
+      'Take the AWS resources down but keep the registry row, so the service can be launched ' +
+      'again later. Images and logs are kept unless asked for.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        delete_images: { type: 'boolean', description: 'Also delete ECR images (default false)' },
+        delete_logs: { type: 'boolean', description: 'Also delete log groups (default false)' },
+      },
+      required: ['name'],
+    },
+    minRole: 'admin',
+  },
+  {
+    name: 'set_log_retention',
+    description:
+      "How long a microservice's container and build logs are kept. Null never expires, which " +
+      'bills forever.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        days: {
+          type: ['number', 'null'],
+          description: 'Retention in days, or null to keep forever',
+        },
+      },
+      required: ['name', 'days'],
+    },
+    minRole: 'operator',
+  },
+  {
+    name: 'clear_microservice_logs',
+    description:
+      "Delete and recreate a microservice's log groups, discarding everything in them. " +
+      'Irreversible, and the usual reason to want it is storage cost.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        source: { type: 'string', enum: ['container', 'build', 'both'] },
+      },
+      required: ['name'],
+    },
+    minRole: 'operator',
+  },
+
+  // ── Clusters — the half that was missing ──────────────────────────────────
+  //
+  // provision and deprovision were already here; creating, resizing and
+  // deleting a cluster were not, so an assistant could turn capacity on and off
+  // but never change what the capacity is.
+  {
+    name: 'create_cluster',
+    description:
+      'Create a compute cluster. A cluster carries exactly one microservice, so this is only ' +
+      'for the recovery case of a service whose cluster was deleted — new services get one ' +
+      'automatically.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        display_name: { type: 'string' },
+        capacity_type: { type: 'string', enum: ['fargate', 'ec2'] },
+        instance_type: { type: 'string', description: 'EC2 only, e.g. g5.xlarge' },
+        scaling_mode: { type: 'string', enum: ['fixed', 'auto'] },
+        min_instances: { type: 'number' },
+        max_instances: { type: 'number' },
+        target_capacity: { type: 'number' },
+        gpu_mode: { type: 'string', enum: ['none', 'exclusive', 'shared'] },
+      },
+      required: ['name', 'capacity_type'],
+    },
+    minRole: 'admin',
+  },
+  {
+    name: 'update_cluster',
+    description:
+      'Change a cluster\'s capacity. On EC2 this replaces instances, so it is a restart of ' +
+      'whatever runs there rather than a setting change.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        display_name: { type: 'string' },
+        instance_type: { type: 'string' },
+        scaling_mode: { type: 'string', enum: ['fixed', 'auto'] },
+        min_instances: { type: 'number' },
+        max_instances: { type: 'number' },
+        target_capacity: { type: 'number' },
+        gpu_mode: { type: 'string', enum: ['none', 'exclusive', 'shared'] },
+      },
+      required: ['name'],
+    },
+    minRole: 'admin',
+  },
+  {
+    name: 'delete_cluster',
+    description:
+      'Remove a cluster from the registry. Refused while a microservice still names it.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+    },
+    minRole: 'admin',
+  },
+
+  // ── Logs ──────────────────────────────────────────────────────────────────
+  {
+    name: 'list_log_groups',
+    description:
+      'Every log group in the deployment, with its stored size and retention, and whether ' +
+      'anything still writes to it. query_logs needs these names, so this is what makes that ' +
+      'tool usable without guessing.',
+    inputSchema: { type: 'object', properties: {} },
+    minRole: 'operator',
+  },
+
+  // ── Storage ───────────────────────────────────────────────────────────────
+  {
+    name: 'list_available_storages',
+    description:
+      'Buckets in the account that are not registered with this deployment — the candidates ' +
+      'for register_storage.',
+    inputSchema: { type: 'object', properties: {} },
+    minRole: 'admin',
+  },
+  {
+    name: 'reconcile_storages',
+    description:
+      'Re-apply the notification configuration on every registered bucket, so a bucket edited ' +
+      'outside this console is put back the way the registry says.',
+    inputSchema: { type: 'object', properties: {} },
+    minRole: 'admin',
+  },
+
+  // ── Aurora rows ───────────────────────────────────────────────────────────
+  {
+    name: 'list_aurora_rows',
+    description:
+      'Read a page of rows from one table. Keyset paginated — pass the cursor from the ' +
+      'previous page rather than an offset.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: { type: 'string' },
+        cursor: { type: 'string', description: 'next_cursor from the previous page' },
+        limit: { type: 'number', description: 'Default 50, max 200' },
+      },
+      required: ['table'],
+    },
+    minRole: 'operator',
+  },
+  {
+    name: 'update_aurora_row',
+    description:
+      'Change fields on one row, addressed by its primary key. These tables drive live ' +
+      'behaviour and the change takes effect immediately.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: { type: 'string' },
+        pk: { type: 'string', description: "The row's primary key value" },
+        values: { type: 'object', description: 'Column name to new value' },
+      },
+      required: ['table', 'pk', 'values'],
+    },
+    minRole: 'admin',
+  },
+  {
+    name: 'delete_aurora_row',
+    description: 'Delete one row by primary key. Irreversible, and only on deletable tables.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: { type: 'string' },
+        pk: { type: 'string' },
+      },
+      required: ['table', 'pk'],
+    },
+    minRole: 'admin',
+  },
+
+  // ── Valkey writes ─────────────────────────────────────────────────────────
+  //
+  // delete_valkey_key was already exposed, so withholding the setters made the
+  // destructive half of the surface available and the repairable half not.
+  {
+    name: 'set_valkey_value',
+    description:
+      'Set a key\'s string value, optionally with a TTL. This cache is on the live SPaT ' +
+      'broadcast path — the change takes effect immediately.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'Fully qualified key; no patterns' },
+        value: { type: 'string' },
+        ttl_seconds: { type: ['number', 'null'] },
+      },
+      required: ['key', 'value'],
+    },
+    minRole: 'admin',
+  },
+  {
+    name: 'set_valkey_field',
+    description: "Set one field of a hash key, leaving the rest of the hash alone.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string' },
+        field: { type: 'string' },
+        value: { type: 'string' },
+      },
+      required: ['key', 'field', 'value'],
+    },
+    minRole: 'admin',
+  },
+  {
+    name: 'set_valkey_ttl',
+    description: "Change a key's expiry, or remove it entirely with null.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string' },
+        ttl_seconds: { type: ['number', 'null'] },
+      },
+      required: ['key', 'ttl_seconds'],
+    },
+    minRole: 'admin',
+  },
+
+  // ── Cost ──────────────────────────────────────────────────────────────────
+  {
+    name: 'get_cost_by_service',
+    description:
+      'Spend broken down by AWS service over a period, for the deployment\'s own cost tag.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        start: { type: 'string', description: 'ISO 8601 date' },
+        end: { type: 'string', description: 'ISO 8601 date' },
+      },
+    },
+    minRole: 'admin',
+  },
+
+  // ── Clients ───────────────────────────────────────────────────────────────
+  {
+    name: 'search_clients_nearby',
+    description:
+      'Connected clients within a radius of a point. The geospatial question the console\'s ' +
+      'map answers — "who is near this intersection right now".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        app_id: { type: 'string' },
+        lat: { type: 'number' },
+        lon: { type: 'number' },
+        radius_m: { type: 'number', description: 'Radius in metres' },
+        limit: { type: 'number' },
+      },
+      required: ['lat', 'lon', 'radius_m'],
+    },
+    minRole: 'operator',
+  },
+
+  // ── Identity ──────────────────────────────────────────────────────────────
+  {
+    name: 'whoami',
+    description:
+      'Who this token acts as and what role it carries. Worth calling first when a tool is ' +
+      'refused: the answer is usually that the token holds less than the tool needs.',
+    inputSchema: { type: 'object', properties: {} },
+  },
 ];
 
 function toolsForRole(role: 'admin' | 'operator' | 'viewer') {
@@ -838,7 +1175,11 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 async function executeTool(
   name: string,
   args: Record<string, unknown>,
-  auth: { role: string; tokenName: string }
+  /**
+   * The whole authorizer context, not just the two fields the admin call needs
+   * — `whoami` reports who the token belongs to, and that is the third.
+   */
+  auth: { role: string; tokenName: string; createdBy?: string }
 ): Promise<unknown> {
   const enc = (s: string) => encodeURIComponent(s);
   const n = () => enc(String(args.name));
@@ -1104,6 +1445,144 @@ async function executeTool(
       return api(`/v1/admin/cost/summary${q ? `?${q}` : ''}`, 'GET', auth);
     }
 
+    // ── Microservice lifecycle ───────────────────────────────────────────────
+    case 'launch_microservice':
+      return vpc(`/v1/admin/microservices/${n()}/launch`, 'POST', auth);
+
+    case 'dismiss_launch':
+      return vpc(`/v1/admin/microservices/${n()}/launch/dismiss`, 'POST', auth);
+
+    case 'check_microservice_source':
+      return vpc(`/v1/admin/microservices/${n()}/check`, 'POST', auth);
+
+    case 'provision_microservice':
+      return vpc(`/v1/admin/microservices/${n()}/provision`, 'POST', auth);
+
+    case 'deprovision_microservice':
+      return vpc(
+        `/v1/admin/microservices/${n()}/deprovision?delete_images=${!!args.delete_images}&delete_logs=${!!args.delete_logs}`,
+        'POST',
+        auth
+      );
+
+    case 'set_log_retention':
+      // Null is a value here, not an omission: it means "never expires".
+      return vpc(`/v1/admin/microservices/${n()}/logs/retention`, 'PUT', auth, {
+        days: args.days === null ? null : Math.trunc(Number(args.days)),
+      });
+
+    case 'clear_microservice_logs':
+      return vpc(`/v1/admin/microservices/${n()}/logs/clear`, 'POST', auth, {
+        source: args.source === 'build' || args.source === 'both' ? args.source : 'container',
+      });
+
+    // ── Clusters ─────────────────────────────────────────────────────────────
+    case 'create_cluster':
+      return vpc('/v1/admin/clusters', 'POST', auth, args);
+
+    case 'update_cluster': {
+      const { name: _clusterName, ...patch } = args;
+      return vpc(`/v1/admin/clusters/${n()}`, 'PATCH', auth, patch);
+    }
+
+    case 'delete_cluster':
+      return vpc(`/v1/admin/clusters/${n()}`, 'DELETE', auth);
+
+    // ── Logs ─────────────────────────────────────────────────────────────────
+    case 'list_log_groups':
+      return api('/v1/admin/logs/groups', 'GET', auth);
+
+    // ── Storage ──────────────────────────────────────────────────────────────
+    case 'list_available_storages':
+      return vpc('/v1/admin/storages/available', 'GET', auth);
+
+    case 'reconcile_storages':
+      return vpc('/v1/admin/storages/reconcile', 'POST', auth);
+
+    // ── Aurora rows ──────────────────────────────────────────────────────────
+    case 'list_aurora_rows': {
+      const qs = new URLSearchParams();
+      if (args.cursor) qs.set('cursor', String(args.cursor));
+      qs.set('limit', String(Math.min(Math.trunc(Number(args.limit ?? 50)), 200)));
+      return vpc(
+        `/v1/admin/db/aurora/tables/${enc(String(args.table))}/rows?${qs.toString()}`,
+        'GET',
+        auth
+      );
+    }
+
+    case 'update_aurora_row':
+      return vpc(
+        `/v1/admin/db/aurora/tables/${enc(String(args.table))}/rows/${enc(String(args.pk))}`,
+        'PATCH',
+        auth,
+        args.values
+      );
+
+    case 'delete_aurora_row':
+      return vpc(
+        `/v1/admin/db/aurora/tables/${enc(String(args.table))}/rows/${enc(String(args.pk))}`,
+        'DELETE',
+        auth
+      );
+
+    // ── Valkey writes ────────────────────────────────────────────────────────
+    case 'set_valkey_value':
+      return vpc('/v1/admin/db/valkey/key/value', 'POST', auth, {
+        key: args.key,
+        value: args.value,
+        ttl_seconds: args.ttl_seconds ?? null,
+      });
+
+    case 'set_valkey_field':
+      return vpc('/v1/admin/db/valkey/key/field', 'POST', auth, {
+        key: args.key,
+        field: args.field,
+        value: args.value,
+      });
+
+    case 'set_valkey_ttl':
+      return vpc('/v1/admin/db/valkey/key/ttl', 'POST', auth, {
+        key: args.key,
+        ttl_seconds: args.ttl_seconds ?? null,
+      });
+
+    // ── Cost ─────────────────────────────────────────────────────────────────
+    case 'get_cost_by_service': {
+      const qs = new URLSearchParams();
+      if (args.start) qs.set('start', String(args.start));
+      if (args.end) qs.set('end', String(args.end));
+      const q = qs.toString();
+      return api(`/v1/admin/cost/service${q ? `?${q}` : ''}`, 'GET', auth);
+    }
+
+    // ── Clients ──────────────────────────────────────────────────────────────
+    case 'search_clients_nearby': {
+      const qs = new URLSearchParams();
+      if (args.app_id) qs.set('app_id', String(args.app_id));
+      qs.set('lat', String(Number(args.lat)));
+      qs.set('lon', String(Number(args.lon)));
+      qs.set('radius_m', String(Number(args.radius_m)));
+      qs.set('limit', String(Math.min(Math.trunc(Number(args.limit ?? 50)), 200)));
+      return vpc(`/v1/admin/clients/search?${qs.toString()}`, 'GET', auth);
+    }
+
+    // ── Identity ─────────────────────────────────────────────────────────────
+    //
+    // Answered from the authorizer's own context rather than by calling the
+    // admin API: /v1/admin/me would report the synthesized caller this server
+    // presents, which is the token's role either way but says nothing about
+    // which token. The question being asked is "what am I allowed to do", and
+    // the honest answer includes the tool count that follows from it.
+    case 'whoami':
+      return {
+        token_name: auth.tokenName,
+        role: auth.role,
+        created_by: auth.createdBy,
+        tools_available: toolsForRole(auth.role as 'admin' | 'operator' | 'viewer').length,
+        tools_total: TOOLS.length,
+      };
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -1129,7 +1608,11 @@ export async function handler(
 
   const context = event.requestContext.authorizer?.lambda as Partial<McpAuthContext> | undefined;
   const role = roleFrom(context);
-  const auth = { role, tokenName: context?.tokenName ?? 'unknown' };
+  const auth = {
+    role,
+    tokenName: context?.tokenName ?? 'unknown',
+    createdBy: context?.createdBy ?? 'unknown',
+  };
   const tools = toolsForRole(role);
 
   let body: JsonRpcRequest | JsonRpcRequest[];
