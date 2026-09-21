@@ -1,12 +1,7 @@
 # MSight Cloud
 
-MSight Cloud is a serverless AWS platform for ingesting, decoding, and
-distributing connected-infrastructure and connected-vehicle data in real
-time — sensor detections (SDSM), traffic signal state (SPaT), and
-intersection geometry (MAP) — to nearby clients over WebSocket and HTTP.
-It ships with a management console, a versioned public HTTP API for client
-applications and integrators, and an MCP server so an AI assistant can
-operate a deployment through natural language.
+MSight Cloud is the cloud platform that coordinates with MSight roadside devices. It is designed to receive and process sensor streams from roadside edge devices, archive and manage sensor data, and provide a comprehensive set of APIs for users and applications to interact with the platform. Through these APIs, MSight Cloud supports a wide range of functionalities, including real-time sensor data streaming, low-latency warning delivery to mobile devices, online SAE J2735 message decoding, and real-time SPaT updates to mobile devices.
+
 
 The entire stack — networking, compute, storage, and the API surface — is
 defined as AWS CDK (TypeScript) and deploys into your own AWS account.
@@ -35,59 +30,16 @@ defined as AWS CDK (TypeScript) and deploys into your own AWS account.
 
 ## Overview
 
-A typical deployment sits behind a set of roadside sensors (e.g. LiDAR units
-processed by an edge device) and traffic signal controllers. MSight Cloud:
+MSight Cloud abstracts each roadside data stream as a logical **sensor**, allowing different sensor streams to be handled independently according to their data characteristics and application requirements. For sensor data that requires real-time processing and delivery, MSight Cloud can provision an **Amazon SNS FIFO topic**. SNS FIFO provides ordered message delivery within a message group and message deduplication, enabling reliable low-latency distribution of sequential sensor data to downstream services. MSight Cloud can further expose these streams through real-time **WebSocket connections**, allowing authorized applications and clients to subscribe to and receive sensor updates with low latency.
 
-- Ingests each sensor's message stream, decodes it, and fans it out to
-  whichever connected client apps are physically nearby.
-- Ingests each intersection's SPaT (signal phase and timing) stream and
-  broadcasts it the same way, with a separate low-latency path for
-  safety-critical changes.
-- Tracks connected client apps' live locations so it knows who is "nearby"
-  for any given broadcast.
-- Serves a small, versioned public HTTP API that client applications use
-  directly — location updates, latency probing, radius broadcast, and
-  intersection map lookup.
-- Gives operators a web console to manage sensors, inspect live clients,
-  deploy their own supporting microservices from a GitHub repository, watch
-  cost and health, and administer users.
-- Gives an AI assistant (Claude, or anything else speaking MCP) the same
-  operational capabilities as the console, over a long-lived token instead
-  of a browser session.
+For sensor data that does not require real-time delivery, data can be buffered, processed, and aggregated at the roadside using **MSight Core**, which provides modular processing nodes for functions such as buffering, sorting, aggregation, transformation, and cloud forwarding. The aggregated data can then be uploaded to the cloud storage bucket configured and managed through MSight Cloud.
 
-## Domain glossary
+In addition to general-purpose sensor streams, MSight Cloud provides dedicated services for connected-vehicle and traffic-signal applications. The platform maintains a **real-time SPaT streaming topic** for receiving and distributing Signal Phase and Timing information represented using the SAE J2735 SPaT message structure. SPaT updates can subsequently be delivered to client applications through WebSocket streams, enabling clients to continuously receive current traffic-signal states.
 
-MSight speaks a few V2X (vehicle-to-everything) terms that are useful to
-know before reading the API surface below:
+MSight Cloud also provides location-aware APIs for mobile and connected-vehicle clients. Based on a client's reported location, the platform can deliver **real-time warning messages** associated with nearby roadway events and provide the corresponding **intersection map information**, containing the roadway and intersection geometry represented by the SAE J2735 MAP message.
 
-| Term | Meaning |
-| --- | --- |
-| **SDSM** | Sensor Data Sharing Message — a standardized description of objects (vehicles, pedestrians, etc.) detected by a roadside sensor. |
-| **SPaT** | Signal Phase and Timing — a traffic signal's current phase (red/yellow/green per movement) and time remaining. |
-| **MAP** | A J2735 MAP message: the lane-level geometry of an intersection, used to interpret SPaT and SDSM in context. |
-| **RSU** | Roadside Unit — the field hardware a sensor or signal controller runs behind. |
 
 ## Architecture
-
-```
-Field sensors ──publish──▶ SNS (fan-out) ──▶ per-sensor SQS FIFO queue ──▶ dedicated ECS Fargate task
-                                                                              │
-Signal controllers ──▶ SNS (SPaT topic) ──▶ Lambda consumers (2 Hz + critical)│
-                                                                              ▼
-                                                          decode → look up intersection in Aurora
-                                                          → find nearby clients in Valkey (geo index)
-                                                          → push over WebSocket
-                                                                              ▲
-Client apps ──HTTP (location, latency, maps)──▶ API Gateway (HTTP API) ──────┘
-Client apps ◀──WebSocket (live pushes)──▶ API Gateway (WebSocket API)
-
-Operators ──HTTPS──▶ Admin console (S3 + CloudFront, Vue/Quasar)
-                          │  Cognito-authenticated
-                          ▼
-                   Admin API (API Gateway) ──▶ two Lambdas: in-VPC (Aurora/Valkey) and out-of-VPC (AWS APIs)
-
-AI assistants ──HTTP (MCP, token-authenticated)──▶ MCP server ──▶ same two admin Lambdas, invoked directly
-```
 
 Core data stores:
 
@@ -219,6 +171,7 @@ src/functions/                One directory per Lambda (TypeScript or Python)
 src/services/sensor-consumer/ The per-sensor ECS Fargate container
 src/shared/                   Zod schemas, the OpenAPI generator, admin-api routing/middleware
 admin-console/                Vue 3 + Quasar management console (deployed to S3 + CloudFront)
+admin-console/.env.example    Template for admin-console/.env — written by deploy.js, not by hand
 test/                         Jest (TypeScript) and unittest (Python) test suites
 deploy.config.example.yaml    Template for deploy.config.yaml (gitignored, holds real account values)
 deploy.js                     npm run deploy: cdk deploy, then build/upload the admin console
@@ -240,7 +193,12 @@ deploy.js                     npm run deploy: cdk deploy, then build/upload the 
 
 ```bash
 npm install
+npm install --prefix admin-console
 ```
+
+Two installs, because the console is a separate package rather than a
+workspace. Skipping the second one gets you all the way to the console build
+inside `npm run deploy` before it fails.
 
 ### 2. Configure
 
@@ -253,31 +211,25 @@ Fill in your AWS account ID, region, and admin console master credentials.
 the example file, including which ones are safe to change later and which
 ones replace live resources if changed after the first deploy.
 
-### 3. Build
+This is the only file you fill in. Everything else the deployment needs is
+derived from it or from the stack's own outputs.
 
-```bash
-npm run build
-```
-
-### 4. Review the changes CDK will make
-
-```bash
-npx cdk diff MsightCloudStack --no-change-set
-```
-
-### 5. Deploy
+### 3. Deploy
 
 ```bash
 npm run deploy
 ```
 
-This runs `cdk deploy`, then builds the admin console against the
-deployment's own API URLs and Cognito pool, uploads it to S3, and
-invalidates CloudFront. (You can run `npx cdk deploy MsightCloudStack
---require-approval never` directly if you only want the infrastructure,
-without touching the console.)
+That is the whole deployment. It runs `cdk deploy`, then builds the admin
+console against the deployment's own API URLs and Cognito pool, uploads it to
+S3, and invalidates CloudFront.
 
-### 6. Verify
+No build step is needed first: CDK runs the TypeScript directly through
+`ts-node`, so `npm run build` is a type-check rather than a prerequisite. See
+[Other commands](#other-commands) for that and for reviewing changes before
+they are applied.
+
+### 4. Verify
 
 ```text
 GET {HttpApiUrl}/system/version
@@ -297,6 +249,29 @@ using the `HttpApiUrl` printed in the deploy output. A response with a
 
 The deploy output also prints the admin console's CloudFront URL — sign in
 with the `masterUsername` / `masterPassword` from `deploy.config.yaml`.
+
+### Other commands
+
+None of these are needed to deploy. They are the things worth running when
+you are changing the code rather than standing it up.
+
+```bash
+npx cdk diff MsightCloudStack --no-change-set   # what a deploy would change
+npm run build                                   # type-check (tsc); not a deploy prerequisite
+npm test                                        # Jest suite (TypeScript)
+npm run test:python                             # unittest suite (Python Lambda/ECS code)
+npx cdk synth MsightCloudStack                  # render the CloudFormation template
+```
+
+`cdk diff` before a deploy is worth the thirty seconds on anything already
+carrying data: it names the resources that would be **replaced** rather than
+updated, which for a database or a user pool means a new empty one.
+
+**Deploying only the infrastructure.** `npx cdk deploy MsightCloudStack
+--require-approval never` deploys the stack without touching the admin
+console, which then keeps serving the previously uploaded build. Useful when
+you have changed nothing in `admin-console/`, and a trap when you have —
+prefer `npm run deploy` unless you specifically want this.
 
 ### Optional deployment variants
 
@@ -346,17 +321,26 @@ A Vue 3 + Quasar single-page app in `admin-console/`, deployed to S3 and
 served through CloudFront, authenticated against the Cognito user pool this
 stack creates. It has no self-registration — the master account from
 `deploy.config.yaml` is the only way in initially, and can create further
-accounts from its Users page. See [`admin-console/README.md`](./admin-console/README.md)
-for local development instructions.
+accounts from its Users page.
+
+`npm run deploy` builds and uploads it as part of every deploy, configured
+from the stack's own outputs — there is nothing to set up for it separately.
+
+See [`admin-console/README.md`](./admin-console/README.md) for running it
+locally against a deployment while working on the UI.
 
 ## Development
 
 ```bash
-npm run build       # compile TypeScript
-npm run watch        # recompile on change
-npm test             # Jest test suite (TypeScript)
+npm run watch        # type-check on change
+npm test             # Jest suite (TypeScript)
 npm run test:python  # unittest suite (Python Lambda/ECS code)
 ```
+
+The Jest suite covers the Lambdas, the CDK stack, and the console's pure
+TypeScript modules; the console's components are type-checked by its own
+build. See [Other commands](#other-commands) for the CDK ones, and
+[`admin-console/README.md`](./admin-console/README.md) for working on the UI.
 
 ## Tech stack
 
