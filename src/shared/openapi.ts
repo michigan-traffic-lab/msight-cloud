@@ -14,7 +14,17 @@ import {
   RadiusBroadcastRequestSchema,
   RadiusBroadcastResponseSchema,
 } from './schemas/radius-broadcast';
+import {
+  MapsByNameResponseSchema,
+  MapsSearchQuerySchema,
+  MapsSearchResponseSchema,
+} from './schemas/maps';
 
+// This document only covers the public, client-facing surface (the routes on
+// MsightHttpApi meant for end-user apps and devices). Admin console / MCP
+// routes (MsightAdminApi), the GitHub webhook, the unwired sensor-api stub,
+// WebSocket routes, and internal SNS/EventBridge-triggered functions are
+// intentionally left out — they aren't part of the client API contract.
 const registry = new OpenAPIRegistry();
 
 registry.registerPath({
@@ -151,6 +161,57 @@ registry.registerPath({
 
 registry.registerPath({
   method: 'get',
+  path: '/v1/maps/search',
+  summary: 'Search maps near a point',
+  description:
+    'Returns maps within the given radius of a lat/lon point, nearest first.',
+  request: {
+    query: MapsSearchQuerySchema,
+  },
+  responses: {
+    200: {
+      description: 'Matching maps.',
+      content: {
+        'application/json': {
+          schema: MapsSearchResponseSchema,
+        },
+      },
+    },
+    400: {
+      description: 'Invalid query parameters.',
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
+  path: '/v1/maps/{name}',
+  summary: 'Get a map by name',
+  request: {
+    params: z.object({
+      name: z.string().openapi({
+        description: 'Map name.',
+        example: 'downtown-ann-arbor',
+      }),
+    }),
+  },
+  responses: {
+    200: {
+      description: 'The requested map.',
+      content: {
+        'application/json': {
+          schema: MapsByNameResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: 'No map found with the given name.',
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
   path: '/system/health',
   summary: 'System API health check',
   responses: {
@@ -172,6 +233,18 @@ registry.registerPath({
   responses: {
     200: {
       description: 'OpenAPI specification in JSON format.',
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
+  path: '/system/docs',
+  summary: 'Interactive API documentation',
+  description: 'Swagger UI, rendered against this same document.',
+  responses: {
+    200: {
+      description: 'Swagger UI HTML page.',
     },
   },
 });

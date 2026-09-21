@@ -221,6 +221,23 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
     ],
   },
   {
+    label: 'Developers',
+    features: [
+      {
+        name: 'api-docs',
+        path: 'api-docs',
+        label: 'API Docs',
+        title: 'API docs',
+        icon: 'menu_book',
+        minRole: 'viewer',
+        subtitle:
+          'Interactive documentation for the public HTTP API used by client apps and devices.',
+        status: 'ready',
+        component: () => import('@/pages/ApiDocsPage.vue'),
+      },
+    ],
+  },
+  {
     label: 'AI',
     features: [
       {

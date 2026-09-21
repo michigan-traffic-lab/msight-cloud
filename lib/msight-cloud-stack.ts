@@ -792,6 +792,12 @@ export class MsightCloudStack extends cdk.Stack {
     });
 
     httpApi.addRoutes({
+      path: '/system/docs',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: systemIntegration,
+    });
+
+    httpApi.addRoutes({
       path: '/system/health',
       methods: [apigwv2.HttpMethod.GET],
       integration: systemIntegration,
