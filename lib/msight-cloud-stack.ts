@@ -1565,6 +1565,12 @@ export class MsightCloudStack extends cdk.Stack {
         HTTP_API_URL: httpApi.apiEndpoint,
         SENSOR_HTTP_API_URL: sensorHttpApi.apiEndpoint,
         WS_API_URL: wsApiUrl,
+        // The console is served from CloudFront, not from any API this stack
+        // exposes, so nothing else in a response would reveal where it lives.
+        // Surfaced through system/info so an operator — or the MCP server on
+        // their behalf — can hand out the dashboard URL without reading it
+        // back out of CloudFormation outputs.
+        CONSOLE_URL: consoleUrl,
         SENSOR_TOPIC_ARN: sensorTopic.topicArn,
         SPAT_TOPIC_ARN: spatTopic.topicArn,
         CONTROL_TOPIC_ARN: controlTopic.topicArn,

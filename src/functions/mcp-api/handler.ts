@@ -79,7 +79,7 @@ const TOOLS: ToolDef[] = [
   // ── System ────────────────────────────────────────────────────────────────
   {
     name: 'get_system_info',
-    description: 'Stack build info: deployment name, version, and environment URLs.',
+    description: 'Stack build info: deployment name, version, and environment URLs, including the admin console (dashboard) URL.',
     inputSchema: { type: 'object', properties: {} },
   },
 

@@ -30,6 +30,7 @@ export interface SystemInfo {
     http_api: string | null;
     sensor_http_api: string | null;
     websocket_api: string | null;
+    admin_console: string | null;
   };
   topics: {
     sensor: string | null;

@@ -84,6 +84,8 @@ export const SystemInfoResponseSchema = z.object({
     http_api: z.string().nullable(),
     sensor_http_api: z.string().nullable(),
     websocket_api: z.string().nullable(),
+    /** CloudFront URL of the admin console. Null if the stack predates it. */
+    admin_console: z.string().nullable(),
   }),
   topics: z.object({
     sensor: z.string().nullable(),

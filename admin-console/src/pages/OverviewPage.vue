@@ -186,6 +186,7 @@ const endpointRows = computed(() => [
   { label: 'Public HTTP API', value: info.data.value?.endpoints.http_api },
   { label: 'Sensor HTTP API', value: info.data.value?.endpoints.sensor_http_api },
   { label: 'WebSocket API', value: info.data.value?.endpoints.websocket_api },
+  { label: 'Admin console', value: info.data.value?.endpoints.admin_console },
 ]);
 
 async function copy(text: string | null | undefined) {

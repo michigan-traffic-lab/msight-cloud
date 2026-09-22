@@ -20,6 +20,7 @@ export function buildInfo() {
       http_api: process.env.HTTP_API_URL || null,
       sensor_http_api: process.env.SENSOR_HTTP_API_URL || null,
       websocket_api: process.env.WS_API_URL || null,
+      admin_console: process.env.CONSOLE_URL || null,
     },
     topics: {
       sensor: process.env.SENSOR_TOPIC_ARN || null,
